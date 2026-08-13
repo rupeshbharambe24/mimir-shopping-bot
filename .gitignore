@@ -11,6 +11,7 @@ venv/
 
 # Agent runtime
 logs/
+.sessions.json
 screenshot.png
 _portscan.ps1
 .persona

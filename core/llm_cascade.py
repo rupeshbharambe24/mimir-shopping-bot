@@ -6,6 +6,7 @@ for speed, falls back to local Ollama if they fail.
 """
 
 import asyncio
+import json
 import logging
 
 import aiohttp
@@ -219,3 +220,163 @@ class SmartLLM:
                     return resp.status == 200
         except Exception:
             return False
+
+    # ── Tool calling ────────────────────────────────────────────────
+    #
+    # Each provider speaks a different dialect for function calling. These
+    # parsers flatten all three into one shape so agent.py never has to know
+    # which provider answered:
+    #
+    #     {"text": str | None, "tool_calls": [{"id", "name", "args"}]}
+
+    @staticmethod
+    def _parse_groq(data: dict) -> dict:
+        message = (data.get("choices") or [{}])[0].get("message", {})
+        calls = []
+        for raw in message.get("tool_calls") or []:
+            fn = raw.get("function", {})
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (ValueError, TypeError):
+                # A model that emits malformed JSON should not kill the turn;
+                # empty args let the tool report what it actually needs.
+                args = {}
+            calls.append({
+                "id": raw.get("id") or fn.get("name", "call"),
+                "name": fn.get("name", ""),
+                "args": args if isinstance(args, dict) else {},
+            })
+        return {"text": message.get("content"), "tool_calls": calls}
+
+    @staticmethod
+    def _parse_gemini(data: dict) -> dict:
+        parts = (
+            (data.get("candidates") or [{}])[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+        text_chunks, calls = [], []
+        for index, part in enumerate(parts):
+            if "functionCall" in part:
+                fc = part["functionCall"]
+                args = fc.get("args") or {}
+                calls.append({
+                    "id": f"{fc.get('name', 'call')}_{index}",
+                    "name": fc.get("name", ""),
+                    "args": args if isinstance(args, dict) else {},
+                })
+            elif "text" in part:
+                text_chunks.append(part["text"])
+        return {"text": "".join(text_chunks) or None, "tool_calls": calls}
+
+    @staticmethod
+    def _parse_ollama(data: dict) -> dict:
+        message = data.get("message", {})
+        calls = []
+        for index, raw in enumerate(message.get("tool_calls") or []):
+            fn = raw.get("function", {})
+            args = fn.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (ValueError, TypeError):
+                    args = {}
+            calls.append({
+                "id": f"{fn.get('name', 'call')}_{index}",
+                "name": fn.get("name", ""),
+                "args": args if isinstance(args, dict) else {},
+            })
+        return {"text": message.get("content") or None, "tool_calls": calls}
+
+    async def ask_with_tools(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Ask the cascade for the next step, with tools available.
+
+        Raises RuntimeError only when every provider fails, so callers can fall
+        back to the regex classifier.
+        """
+        providers = [
+            (GROQ, self._tools_groq),
+            (GEMINI, self._tools_gemini),
+            (OLLAMA, self._tools_ollama),
+        ]
+        errors = []
+        for name, fn in providers:
+            try:
+                logger.info(f"Tool cascade: trying {name}")
+                result = await fn(messages, tools)
+                self._last_provider = name
+                return result
+            except Exception as exc:
+                logger.warning(f"Tool cascade: {name} failed — {type(exc).__name__}: {exc}")
+                errors.append(f"{name}: {exc}")
+        self._last_provider = "none"
+        raise RuntimeError("All providers failed: " + "; ".join(errors))
+
+    async def _tools_groq(self, messages: list[dict], tools: list[dict]) -> dict:
+        if not Config.GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY not configured")
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {Config.GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": Config.GROQ_MODEL,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(url, json=payload, headers=headers, timeout=_TIMEOUT) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"Groq HTTP {resp.status}: {(await resp.text())[:300]}")
+                return self._parse_groq(await resp.json())
+
+    async def _tools_gemini(self, messages: list[dict], tools: list[dict]) -> dict:
+        if not Config.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY not configured")
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/"
+            f"models/{Config.GEMINI_MODEL}:generateContent?key={Config.GEMINI_API_KEY}"
+        )
+        contents, system_text = [], None
+        for msg in messages:
+            role = msg.get("role")
+            if role == "system":
+                system_text = msg.get("content")
+                continue
+            if role == "tool":
+                contents.append({"role": "user", "parts": [
+                    {"text": f"Result of {msg.get('name')}:\n{msg.get('content')}"},
+                ]})
+                continue
+            contents.append({
+                "role": "model" if role == "assistant" else "user",
+                "parts": [{"text": msg.get("content") or ""}],
+            })
+        body = {
+            "contents": contents,
+            "tools": [{"functionDeclarations": [t["function"] for t in tools]}],
+        }
+        if system_text:
+            body["systemInstruction"] = {"parts": [{"text": system_text}]}
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(url, json=body, timeout=_TIMEOUT) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"Gemini HTTP {resp.status}: {(await resp.text())[:300]}")
+                return self._parse_gemini(await resp.json())
+
+    async def _tools_ollama(self, messages: list[dict], tools: list[dict]) -> dict:
+        url = f"{Config.OLLAMA_URL}/api/chat"
+        payload = {
+            "model": Config.DEFAULT_MODEL,
+            "messages": messages,
+            "tools": tools,
+            "stream": False,
+        }
+        timeout = aiohttp.ClientTimeout(total=120)
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(url, json=payload, timeout=timeout) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"Ollama HTTP {resp.status}: {(await resp.text())[:300]}")
+                return self._parse_ollama(await resp.json())

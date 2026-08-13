@@ -234,10 +234,30 @@ python3 main.py
 
 ### Run as Service
 
+One-time install. `chmod 644` matters: the file is copied off a Windows drive,
+where everything is mode 777, and systemd refuses world-writable unit files.
+
 ```bash
-sudo cp ai-agent.service /etc/systemd/system/
-sudo systemctl enable ai-agent
+sudo cp ai-agent.service /etc/systemd/system/ai-agent.service
+sudo chmod 644 /etc/systemd/system/ai-agent.service
+sudo systemctl daemon-reload
+sudo systemctl enable ai-agent    # auto-start when the WSL distro boots
 sudo systemctl start ai-agent
+systemctl status ai-agent --no-pager
+```
+
+Once enabled, systemd starts RAVEN as soon as the distro boots, so neither
+`Start RAVEN.bat` nor the login VBS needs `sudo`. Both call `start-raven.sh`,
+which waits for the service and falls back to a foreground run if it isn't
+installed.
+
+> **Never put `sudo` in the startup VBS.** It runs hidden, so sudo has no
+> terminal to prompt on and blocks forever — RAVEN then silently never starts.
+
+Logs:
+
+```bash
+journalctl -u ai-agent -f
 ```
 
 ## Permission System

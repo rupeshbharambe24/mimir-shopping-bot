@@ -31,7 +31,9 @@ class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL = "llama-3.3-70b-versatile"
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL = "gemini-2.0-flash"
+    # "-latest" rather than a pinned version: gemini-2.0-flash was retired and
+    # started returning 404, silently killing the fallback provider.
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
     WORKSPACE = Path(os.getenv("WORKSPACE", str(Path(__file__).parent)))
     LOG_FILE = Path(os.getenv("LOG_FILE", "logs/agent.log"))

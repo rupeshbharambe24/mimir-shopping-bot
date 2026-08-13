@@ -13,12 +13,13 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram.request import HTTPXRequest
 
 from config import Config
 from core.guard import Guard
 from core.llm_cascade import SmartLLM
 from core.notebook import NotebookManager
-from core import brain
+from core import brain, agent, paths, session
 from core.monitor import ProcessMonitor
 from tools import file_ops, process_ops, screenshot, system_info, git_ops
 
@@ -274,14 +275,16 @@ def _resolve_repo_path(context) -> str:
     return str(Config.WORKSPACE)
 
 
-def _wsl_to_win(wsl_path: str) -> str:
-    """Convert /mnt/c/... to C:\\..."""
-    if wsl_path.startswith("/mnt/"):
-        parts = wsl_path[5:].split("/", 1)
-        drive = parts[0].upper()
-        rest = parts[1] if len(parts) > 1 else ""
-        return f"{drive}:\\{rest}".replace("/", "\\")
-    return wsl_path
+def _dir_arg(update, context) -> str:
+    """Resolve a command's path argument against the chat's current folder.
+
+    Bare commands (`/ls` with no argument) fall back to the session's current
+    folder rather than WORKSPACE, which is what makes `cd` then `ls` behave the
+    way anyone would expect.
+    """
+    cwd = session.get_cwd(update.effective_chat.id)
+    raw = " ".join(context.args) if context.args else ""
+    return paths.normalize(raw, cwd) or cwd
 
 
 # ── /start and /help ─────────────────────────────────────────────
@@ -348,12 +351,20 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /models          - List Ollama models [auto]\n"
         "  /logs            - Recent agent logs [auto]\n"
         "  /apply           - Apply LLM-suggested fix [approval]\n\n"
+        "Navigation:\n"
+        "  /cd <path>       - Change current folder [auto]\n"
+        "  /pwd             - Show current folder [auto]\n"
+        "  /open <path>     - Open in Explorer [auto]\n\n"
+        "Paths accept any spelling: D:\\Projects, D:/Projects,\n"
+        "/mnt/d/Projects, 'd drive projects', or a name relative\n"
+        "to the current folder. /ls and /tree with no argument use\n"
+        "the current folder.\n\n"
         "Utility:\n"
-        "  /open <path>     - Open in Explorer [auto]\n"
         "  /clip <text>     - Copy to clipboard [auto]\n"
         "  /bookmark <name> <path> - Save bookmark\n"
         "  /go <name>       - List bookmark dir\n\n"
-        "Or just type freely to chat with the LLM."
+        "Or just type naturally - 'go to d drive projects and list\n"
+        "the folders' works. The LLM drives the tools directly."
     )
 
 
@@ -395,20 +406,20 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_read(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    filepath = " ".join(context.args) if context.args else ""
-    if not filepath:
+    if not context.args:
         await update.message.reply_text("Usage: /read <filepath>")
         return
+    filepath = _dir_arg(update, context)
     context.chat_data["last_file_path"] = filepath
     content = file_ops.read_file(filepath)
-    await reply(update.message, f"{filepath}:\n\n{content}")
+    await reply(update.message, f"{paths.to_windows(filepath)}:\n\n{content}")
 
 
 @authorized
 async def cmd_ls(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    dirpath = " ".join(context.args) if context.args else str(Config.WORKSPACE)
+    dirpath = _dir_arg(update, context)
     content = file_ops.list_dir(dirpath)
-    await reply(update.message, f"{dirpath}:\n\n{content}")
+    await reply(update.message, f"{paths.to_windows(dirpath)}:\n\n{content}")
 
 
 @authorized
@@ -568,16 +579,16 @@ async def cmd_find(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_tree(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show directory tree. Usage: /tree <path> or /tree (workspace)"""
-    dirpath = " ".join(context.args) if context.args else str(Config.WORKSPACE)
+    """Show directory tree. Usage: /tree <path> or /tree (current folder)"""
+    dirpath = _dir_arg(update, context)
     result = file_ops.tree(dirpath)
-    await reply(update.message, result)
+    await reply(update.message, f"{paths.to_windows(dirpath)}:\n\n{result}")
 
 
 @authorized
 async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show recently modified files. Usage: /recent or /recent <path>"""
-    dirpath = " ".join(context.args) if context.args else None
+    dirpath = _dir_arg(update, context)
     result = file_ops.recent_files(dirpath)
     await reply(update.message, result)
 
@@ -1149,15 +1160,43 @@ async def _offer_git_commit(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 @authorized
 async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Open file/folder in Windows Explorer. Usage: /open <path>"""
-    filepath = " ".join(context.args) if context.args else str(Config.WORKSPACE)
-    win_path = _wsl_to_win(filepath)
-    try:
-        cmd = f"powershell.exe -Command \"Start-Process '{win_path}'\""
-        await process_ops.run_command(cmd, timeout=10)
-        await update.message.reply_text(f"Opened: {win_path}")
-    except Exception as e:
-        await update.message.reply_text(f"Failed to open: {e}")
+    """Open file/folder in Windows Explorer. Usage: /open <path> or /open (current folder)"""
+    target = _dir_arg(update, context)
+    win_path = paths.to_windows(target)
+    cmd = f"powershell.exe -NoProfile -Command \"Start-Process '{win_path}'\""
+    returncode, _, stderr = await process_ops.run_command(cmd, timeout=15)
+    if returncode != 0:
+        await update.message.reply_text(f"Failed to open {win_path}: {stderr.strip()[:200]}")
+        return
+    await update.message.reply_text(f"Opened: {win_path}")
+
+
+@authorized
+async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Change the current folder. Usage: /cd <path>"""
+    chat_id = update.effective_chat.id
+    if not context.args:
+        await update.message.reply_text(
+            f"Current folder: {paths.to_windows(session.get_cwd(chat_id))}"
+        )
+        return
+    target = _dir_arg(update, context)
+    ok, resolved = file_ops.validate_path(target, cwd=session.get_cwd(chat_id))
+    if not ok:
+        await update.message.reply_text(f"Access denied: {target}")
+        return
+    if not resolved.is_dir():
+        await update.message.reply_text(f"Not a directory: {paths.to_windows(str(resolved))}")
+        return
+    session.set_cwd(chat_id, str(resolved))
+    await update.message.reply_text(f"Now in: {paths.to_windows(str(resolved))}")
+
+
+@authorized
+async def cmd_pwd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the current folder."""
+    cwd = session.get_cwd(update.effective_chat.id)
+    await update.message.reply_text(paths.to_windows(cwd))
 
 
 @authorized
@@ -1982,6 +2021,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result)
         return
 
+    await typing(update)
+    thinking = await update.message.reply_text("Working...")
+
+    async def deliver(path: str):
+        """Send a file the agent produced back to the user."""
+        with open(path, "rb") as handle:
+            await update.message.reply_document(
+                document=handle, filename=Path(path).name,
+            )
+
+    try:
+        answer = await agent.run(
+            bot=context.bot,
+            chat_id=update.effective_chat.id,
+            text=text,
+            llm=llm,
+            guard=guard,
+            on_file=deliver,
+        )
+    except Exception as exc:
+        # Every provider is down. Fall back to the regex classifier so basic
+        # navigation still works with no LLM at all.
+        logger.warning(f"Agent loop unavailable ({exc}); falling back to regex.")
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+        await _handle_message_regex(update, context, text)
+        return
+
+    try:
+        await thinking.delete()
+    except Exception:
+        pass
+    await reply_smart(update.message, answer or "No response.")
+
+
+async def _handle_message_regex(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Last-resort classifier, used only when every LLM provider is down."""
     intent, args = brain.classify(text)
 
     if intent == "multi_step":
@@ -2194,6 +2272,8 @@ async def post_init(application: Application):
         BotCommand("apply", "Apply LLM-suggested fix"),
         BotCommand("do", "Execute a complex task"),
         BotCommand("open", "Open in Explorer"),
+        BotCommand("cd", "Change current folder"),
+        BotCommand("pwd", "Show current folder"),
         BotCommand("clip", "Copy to clipboard"),
         BotCommand("bookmark", "Save a bookmark"),
         BotCommand("go", "Go to bookmark"),
@@ -2271,9 +2351,29 @@ async def post_init(application: Application):
 
 def create_bot() -> Application:
     """Create and configure the Telegram bot."""
+    # RAVEN starts on a cold WSL boot, where the NAT interface often needs a few
+    # seconds before it can carry traffic. PTB's 5s default connect timeout is
+    # short enough that the very first getMe() call can time out and — combined
+    # with bootstrap_retries=0 in main.py — kill the process outright.
+    request = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=10.0,
+    )
+    # Long polling holds the connection open, so read_timeout must exceed it.
+    get_updates_request = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=40.0,
+        write_timeout=30.0,
+        pool_timeout=10.0,
+    )
+
     app = (
         Application.builder()
         .token(Config.TELEGRAM_TOKEN)
+        .request(request)
+        .get_updates_request(get_updates_request)
         .post_init(post_init)
         .concurrent_updates(True)
         .build()
@@ -2321,6 +2421,8 @@ def create_bot() -> Application:
 
     # Command handlers — quality of life
     app.add_handler(CommandHandler("open", cmd_open))
+    app.add_handler(CommandHandler("cd", cmd_cd))
+    app.add_handler(CommandHandler("pwd", cmd_pwd))
     app.add_handler(CommandHandler("clip", cmd_clip))
     app.add_handler(CommandHandler("bookmark", cmd_bookmark))
     app.add_handler(CommandHandler("go", cmd_go))

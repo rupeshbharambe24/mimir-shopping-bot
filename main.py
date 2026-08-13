@@ -28,7 +28,10 @@ def main():
 
     bot = create_bot()
     logger.info("Bot created. Starting Telegram polling...")
-    bot.run_polling(drop_pending_updates=True)
+    # bootstrap_retries=-1 means retry forever. The default of 0 makes a single
+    # transient connect timeout on the first getMe() call abort startup, which
+    # is exactly what happens when WSL's network isn't up yet at cold boot.
+    bot.run_polling(drop_pending_updates=True, bootstrap_retries=-1)
 
 
 if __name__ == "__main__":

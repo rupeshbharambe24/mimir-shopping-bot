@@ -7,14 +7,7 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
-def _wsl_to_win(wsl_path: str) -> str:
-    """Convert /mnt/c/... to C:\\..."""
-    if wsl_path.startswith("/mnt/"):
-        parts = wsl_path[5:].split("/", 1)
-        drive = parts[0].upper()
-        rest = parts[1] if len(parts) > 1 else ""
-        return f"{drive}:\\{rest}".replace("/", "\\")
-    return wsl_path
+from core.paths import to_windows as _wsl_to_win
 
 
 async def take_screenshot() -> tuple[str | None, str | None]:
