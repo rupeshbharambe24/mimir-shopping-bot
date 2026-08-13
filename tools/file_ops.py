@@ -2,16 +2,34 @@ import logging
 from pathlib import Path
 
 from config import Config
+from core import paths
 
 logger = logging.getLogger(__name__)
 
 
-def validate_path(filepath: str) -> tuple[bool, Path]:
-    """Ensure the path is within allowed directories."""
-    target = Path(filepath).resolve()
+def validate_path(filepath: str, cwd: str | None = None) -> tuple[bool, Path]:
+    """Interpret a user-supplied path and confirm it is inside ALLOWED_PATHS.
+
+    Normalization happens first, so Windows spellings (D:\\Projects) land where
+    the user meant. Previously these fell through to cwd-relative resolution
+    and silently pointed inside the workspace.
+    """
+    normalized = paths.normalize(filepath, cwd or str(Config.WORKSPACE))
+    if normalized is None:
+        return False, Path(filepath or ".")
+
+    # Dereference symlinks BEFORE the prefix check. paths.normalize is purely
+    # lexical, so without this a symlink planted inside an allowed root would
+    # keep an in-bounds prefix while pointing anywhere on disk. strict=False so
+    # not-yet-created files (write_file targets) still resolve their parents.
+    try:
+        target = Path(normalized).resolve(strict=False)
+    except (OSError, RuntimeError):  # RuntimeError = symlink loop
+        return False, Path(normalized)
+
     for allowed in Config.ALLOWED_PATHS:
         try:
-            target.relative_to(allowed.resolve())
+            target.relative_to(Path(allowed).resolve())
             return True, target
         except ValueError:
             continue
