@@ -15,6 +15,8 @@ CWD = "/mnt/c/Users/rupes/ai-agent"
 def temp_session(tmp_path, monkeypatch):
     monkeypatch.setattr(session, "SESSION_FILE", tmp_path / "s.json")
     monkeypatch.setattr(session, "_cache", None)
+    from config import Config
+    monkeypatch.setattr(Config, "TELEGRAM_CHAT_ID", 7)
     yield
 
 

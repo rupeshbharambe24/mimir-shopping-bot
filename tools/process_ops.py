@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from config import Config
@@ -63,6 +64,100 @@ async def run_command(command: str, timeout: int = 30, cwd: str | None = None) -
         return -1, "", f"Command timed out after {timeout}s"
     except Exception as e:
         return -1, "", str(e)
+
+
+async def _run_exec(argv: list[str], timeout: int, env: dict | None = None) -> tuple[int, str, str]:
+    """Run a program by argv (no shell). Returns (returncode, stdout, stderr)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return (
+            proc.returncode,
+            stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+        )
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return -1, "", f"Command timed out after {timeout}s"
+    except Exception as e:
+        return -1, "", str(e)
+
+
+def _wslenv_with(*names: str) -> dict:
+    """A copy of os.environ with `names` registered in WSLENV so they cross
+    into Win32 processes. Without this, env vars set in WSL are invisible to
+    powershell.exe."""
+    env = dict(os.environ)
+    existing = env.get("WSLENV", "")
+    additions = ":".join(names)
+    env["WSLENV"] = f"{existing}:{additions}" if existing else additions
+    return env
+
+
+async def open_in_explorer(win_path: str, timeout: int = 15) -> tuple[int, str, str]:
+    """Open a path in Windows Explorer WITHOUT a shell.
+
+    The path travels as an environment variable and is referenced in PowerShell
+    as ``$env:RAVEN_OPEN_PATH``. PowerShell reads an env var as a literal
+    string, never as code, so a path containing shell/PowerShell metacharacters
+    (legal in WSL filenames) cannot inject commands. This replaces the previous
+    ``Start-Process '<path>'`` string interpolation, which was RCE-injectable.
+    """
+    env = _wslenv_with("RAVEN_OPEN_PATH")
+    env["RAVEN_OPEN_PATH"] = win_path
+    return await _run_exec(
+        ["powershell.exe", "-NoProfile", "-Command",
+         "Start-Process -FilePath $env:RAVEN_OPEN_PATH"],
+        timeout=timeout,
+        env=env,
+    )
+
+
+async def copy_to_clipboard(text: str, timeout: int = 10) -> tuple[int, str, str]:
+    """Copy text to the Windows clipboard WITHOUT a shell.
+
+    Text is piped to clip.exe over stdin, so it is never parsed by a shell.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "clip.exe",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(
+            proc.communicate(text.encode("utf-8")), timeout=timeout
+        )
+        return proc.returncode, "", stderr.decode("utf-8", errors="replace")
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return -1, "", f"Clipboard timed out after {timeout}s"
+    except Exception as e:
+        return -1, "", str(e)
+
+
+async def run_powershell_file(win_path: str, timeout: int = 30) -> tuple[int, str, str]:
+    """Run a .ps1 script by path WITHOUT a shell.
+
+    The path is a single argv element and PowerShell's -File reads it literally
+    (it does not evaluate expressions), so a path containing quotes or other
+    metacharacters cannot break out into command injection.
+    """
+    return await _run_exec(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", win_path],
+        timeout=timeout,
+    )
 
 
 async def run_background_command(command: str, cwd: str | None = None,

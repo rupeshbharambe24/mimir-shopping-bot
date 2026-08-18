@@ -291,8 +291,7 @@ async def _dispatch(name: str, args: dict, chat_id: int) -> str:
         if not ok:
             return err
         win = paths.to_windows(str(target))
-        cmd = f"powershell.exe -NoProfile -Command \"Start-Process '{win}'\""
-        rc, _, stderr = await process_ops.run_command(cmd, timeout=15)
+        rc, _, stderr = await process_ops.open_in_explorer(win, timeout=15)
         if rc != 0:
             return f"Could not open {win}: {stderr.strip()[:200]}"
         return f"Opened {win} in Explorer."

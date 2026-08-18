@@ -1163,8 +1163,7 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Open file/folder in Windows Explorer. Usage: /open <path> or /open (current folder)"""
     target = _dir_arg(update, context)
     win_path = paths.to_windows(target)
-    cmd = f"powershell.exe -NoProfile -Command \"Start-Process '{win_path}'\""
-    returncode, _, stderr = await process_ops.run_command(cmd, timeout=15)
+    returncode, _, stderr = await process_ops.open_in_explorer(win_path, timeout=15)
     if returncode != 0:
         await update.message.reply_text(f"Failed to open {win_path}: {stderr.strip()[:200]}")
         return
@@ -1207,10 +1206,7 @@ async def cmd_clip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /clip <text to copy>")
         return
     try:
-        # Use echo with pipe to clip.exe
-        escaped = text.replace("'", "'\\''")
-        cmd = f"echo '{escaped}' | clip.exe"
-        returncode, _, stderr = await process_ops.run_command(cmd, timeout=10)
+        returncode, _, stderr = await process_ops.copy_to_clipboard(text, timeout=10)
         if returncode == 0:
             preview = text[:100] + ("..." if len(text) > 100 else "")
             await update.message.reply_text(f"Copied to clipboard: {preview}")
@@ -1659,8 +1655,7 @@ async def _scan_open_ports() -> set[int]:
     else:
         win_path = wsl_path
     try:
-        cmd = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{win_path}"'
-        rc, stdout, _ = await process_ops.run_command(cmd, timeout=15)
+        rc, stdout, _ = await process_ops.run_powershell_file(win_path, timeout=15)
         return {int(p.strip()) for p in stdout.strip().split("\n") if p.strip().isdigit()}
     except Exception:
         return set()
@@ -1702,8 +1697,7 @@ async def _find_dev_server_by_scan(exclude_ports: set[int] | None = None) -> str
         win_path = wsl_path
 
     try:
-        cmd = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{win_path}"'
-        returncode, stdout, stderr = await process_ops.run_command(cmd, timeout=30)
+        returncode, stdout, stderr = await process_ops.run_powershell_file(win_path, timeout=30)
         port = stdout.strip()
         if port and port.isdigit():
             return f"http://localhost:{port}"
@@ -1832,8 +1826,7 @@ async def _execute_task(bot, chat_id, task_text: str, context):
             if found_url:
                 detected_url = found_url
                 output_log += f"\nDev server found: {detected_url}"
-                open_cmd = f"powershell.exe -Command \"Start-Process '{detected_url}'\""
-                await process_ops.run_command(open_cmd, timeout=10)
+                await process_ops.open_in_explorer(detected_url, timeout=10)
                 output_log += f"\nOpened {detected_url} in browser"
                 import asyncio as _aio
                 await _aio.sleep(12)  # let page fully load and render

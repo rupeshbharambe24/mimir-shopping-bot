@@ -92,3 +92,33 @@ async def test_find_files_reports_windows_paths(monkeypatch):
 async def test_find_files_requires_query():
     out = await tools_registry.execute("find_files", {}, chat_id=7)
     assert "needs a query" in out
+
+
+async def test_open_explorer_does_not_build_a_shell_string(monkeypatch):
+    """A path with shell metacharacters must reach a shell-free opener, not an
+    interpolated command string. Regression for the open_explorer RCE."""
+    captured = {}
+
+    async def fake_open(win_path, timeout=15):
+        captured["win_path"] = win_path
+        return 0, "", ""
+
+    # open_in_explorer must be called; run_command (the shell path) must not.
+    monkeypatch.setattr(tools_registry.process_ops, "open_in_explorer", fake_open)
+
+    def boom(*a, **kw):
+        raise AssertionError("open_explorer must not build a shell command string")
+
+    monkeypatch.setattr(tools_registry.process_ops, "run_command", boom)
+    monkeypatch.setattr(
+        tools_registry.file_ops, "validate_path",
+        lambda p, cwd=None: (True, Path('/mnt/d/x"; touch /tmp/PWNED; echo "')),
+    )
+
+    out = await tools_registry.execute(
+        "open_explorer", {"path": 'x"; touch /tmp/PWNED; echo "'}, chat_id=7,
+    )
+    # The raw metacharacters are handed to the safe opener verbatim (it neutralizes
+    # them via env-var passing), and no shell string was ever constructed.
+    assert ";" in captured["win_path"]
+    assert "Opened" in out

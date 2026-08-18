@@ -34,6 +34,8 @@ class FakeGuard:
 def temp_session(tmp_path, monkeypatch):
     monkeypatch.setattr(session, "SESSION_FILE", tmp_path / "s.json")
     monkeypatch.setattr(session, "_cache", None)
+    from config import Config
+    monkeypatch.setattr(Config, "TELEGRAM_CHAT_ID", 7)
     yield
 
 
@@ -241,3 +243,21 @@ async def test_small_tool_results_are_not_truncated(monkeypatch):
 
     tool_msg = [m for m in llm.calls[1] if m.get("role") == "tool"][0]
     assert tool_msg["content"] == "short listing"
+
+
+async def test_unauthorized_chat_is_refused(monkeypatch):
+    """Defense in depth: the loop must not run for a non-owner chat_id."""
+    from config import Config
+    monkeypatch.setattr(Config, "TELEGRAM_CHAT_ID", 7)
+
+    called = False
+
+    class ShouldNotBeCalled:
+        async def ask_with_tools(self, messages, tools):
+            nonlocal called
+            called = True
+            return {"text": "hi", "tool_calls": []}
+
+    with pytest.raises(PermissionError):
+        await agent.run(bot=None, chat_id=999, text="hi", llm=ShouldNotBeCalled(), guard=FakeGuard())
+    assert called is False, "LLM must not be consulted for an unauthorized chat"

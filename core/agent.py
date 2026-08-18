@@ -9,6 +9,7 @@ propose them but only the user can authorize them.
 import json
 import logging
 
+from config import Config
 from core import paths, session, tools_registry
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,14 @@ async def run(bot, chat_id: int, text: str, llm, guard, on_file=None) -> str:
     Raises RuntimeError when every LLM provider is unavailable, so the caller
     can fall back to the regex classifier.
     """
+    # Defense in depth: the tool loop can read files, open Explorer and (with
+    # approval) run code, so it must never execute for anyone but the owner --
+    # even if a future caller forgets the @authorized decorator that also gates
+    # this at the Telegram entry point.
+    if chat_id != Config.TELEGRAM_CHAT_ID:
+        logger.warning(f"agent.run refused for unauthorized chat_id={chat_id}")
+        raise PermissionError("unauthorized chat")
+
     cwd = session.get_cwd(chat_id)
     messages = [
         {"role": "system", "content": _SYSTEM.format(cwd_win=paths.to_windows(cwd))},
