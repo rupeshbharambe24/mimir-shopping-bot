@@ -357,13 +357,28 @@ canonical interface.
 ```
 Telegram
    |
-MIMIR agent loop  (Groq -> Gemini -> Ollama)
-   |  commerce_* tools
+Mimir  (Telegram front-end + the Approve gate)
    |  HTTP, loopback only
-agentic-commerce BFF  :8011      <- separate process, separate venv
-   |  ProviderAdapter
-Swiggy Instamart MCP  /  Mock provider
+agentic-commerce BFF  :8011     <- separate process, separate venv
+   |  Gemini tool-calling loop
+   |  drives the provider's RAW MCP tools
+Swiggy Instamart MCP  (14 tools)  /  Mock provider
 ```
+
+**Why the conversation runs on the commerce side.** The `ProviderAdapter`
+interface exposes what is *comparable across providers* — search, cart,
+checkout. Swiggy's MCP server actually exposes 14 tools, including
+`your_go_to_items`, `get_orders`, `track_order` and `get_payment_options`. A
+client driving only the canonical wrappers loses most of what the provider can
+do: it cannot offer you a list of biscuits to choose from or read your usual
+items. So plain messages go to the commerce agent, which has the real tool set.
+
+Mimir keeps the one decision that loop must not make alone: whether to spend.
+When the loop is blocked on confirmation, Mimir snapshots the cart, shows the
+line items and total, and waits for your tap.
+
+Mimir's own tool loop still handles anything the commerce agent cannot, and
+`BOT_MODE=full` restores the developer tools to its tool set.
 
 The sidecar is a **separate process on purpose**. Its `requirements.txt` pins
 `mcp` exactly because an unpinned bump silently broke its transport once;
@@ -381,8 +396,12 @@ cp com.mimir.commerce.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mimir.commerce.plist
 ```
 
-Set `COMMERCE_DIR` if agentic-commerce is not at
-`~/Projects/Experiments/agentic-commerce`.
+The platform is vendored at `agentic-commerce/`. Set `COMMERCE_DIR` only if
+you keep it elsewhere.
+
+Its `.env` and Swiggy OAuth tokens are **not** in git — copy
+`agentic-commerce/.env.example` to `agentic-commerce/.env` and fill in
+`GEMINI_API_KEY` on a fresh clone.
 
 ### The money path
 
