@@ -303,39 +303,58 @@ def _dir_arg(update, context) -> str:
 @authorized
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await typing(update)
-    await update.message.reply_text(
-        "Hi, I'm Mimir - your shopping assistant.\n\n"
-        "Tell me what you need in plain English:\n"
-        "  \"do we have milk and bread\"\n"
-        "  \"add 2 litres of milk to my cart\"\n"
-        "  \"what's in my cart?\"\n\n"
-        "I'll always show you the full cart and total,\n"
-        "and you tap Approve before anything is ordered.\n\n"
-        "/help for everything I can do."
+    await reply(
+        update.message,
+        "\U0001F44B <b>Hi, I'm Mimir</b>\n"
+        "<i>your shopping assistant</i>\n"
+        "\n"
+        "Just tell me what you need, the way you'd tell a person:\n"
+        "\n"
+        "  \u2022  <i>\u201cdo we have milk and bread?\u201d</i>\n"
+        "  \u2022  <i>\u201cadd 2 packs of bourbon biscuits\u201d</i>\n"
+        "  \u2022  <i>\u201cwhat's in my cart?\u201d</i>\n"
+        "  \u2022  <i>\u201cI'm making samosas \u2014 what do I need?\u201d</i>\n"
+        "\n"
+        "\U0001F512  <b>Before anything is ordered</b>, I'll show you the\n"
+        "full cart and total, and wait for you to tap <b>Approve</b>.\n"
+        "No tap, no order. Every time.\n"
+        "\n"
+        "\U0001F4A1  <code>/help</code> \u2014 everything I can do\n"
+        "\U0001F6D2  <code>/providers</code> \u2014 which stores are connected",
+        use_html=True,
     )
 
 
 @authorized
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await reply(update.message,
-        "WHAT I CAN DO\n\n"
-        "Just talk to me normally:\n"
-        "  \"find brown bread\"\n"
-        "  \"add 2 of the cheapest to my cart\"\n"
-        "  \"checkout\"\n\n"
-        "Shopping:\n"
-        "  /search <item>   - Search the store\n"
-        "  /cart            - Show your cart and total\n"
-        "  /providers       - Which stores are set up\n"
-        "  /connect <store> - Log in to a store\n\n"
-        "Orders:\n"
-        "  Checkout always shows you the cart and total,\n"
-        "  then waits for you to tap Approve. Nothing is\n"
-        "  ever ordered without that tap.\n\n"
-        "Other:\n"
-        "  /status          - Am I working?\n"
-        "  /persona <name>  - mimir | formal | friendly | brief\n"
-        "  /stop            - Shut me down"
+    await reply(
+        update.message,
+        "\U0001F6D2  <b>Shopping with Mimir</b>\n"
+        "\n"
+        "<b>Just talk to me.</b> No commands needed:\n"
+        "  <i>\u201cfind brown bread\u201d</i>\n"
+        "  <i>\u201cadd 2 of the cheapest\u201d</i>\n"
+        "  <i>\u201cwhat did I order last week?\u201d</i>\n"
+        "  <i>\u201ccheckout\u201d</i>\n"
+        "\n"
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+        "\n"
+        "<b>Shortcuts</b>\n"
+        "  <code>/search</code> <i>item</i>  \u2014  look something up\n"
+        "  <code>/cart</code>  \u2014  what's in your basket\n"
+        "  <code>/providers</code>  \u2014  connected stores\n"
+        "  <code>/connect</code> <i>store</i>  \u2014  log in to a store\n"
+        "\n"
+        "<b>\U0001F512 About ordering</b>\n"
+        "I'll always show you the items and the total first,\n"
+        "then wait for your <b>Approve</b> tap. I never place an\n"
+        "order on my own, and I won't ask twice if you say no.\n"
+        "\n"
+        "<b>Other</b>\n"
+        "  <code>/status</code>  \u2014  am I working?\n"
+        "  <code>/persona</code> <i>name</i>  \u2014  mimir \u00b7 formal \u00b7 friendly \u00b7 brief\n"
+        "  <code>/stop</code>  \u2014  shut me down",
+        use_html=True,
     )
 
 
@@ -1841,7 +1860,7 @@ async def cmd_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List shopping providers and their connection state. Usage: /providers"""
     await typing(update)
-    await reply(update.message, await commerce.providers(update.effective_chat.id))
+    await reply(update.message, await commerce.providers(update.effective_chat.id), use_html=True)
 
 
 @authorized
@@ -1854,13 +1873,13 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     provider = context.args[0].strip()
-    msg = await update.message.reply_text(f"Connecting to {provider} ...")
+    msg = await update.message.reply_text(f"\U0001F510 <i>Connecting to {provider}\u2026</i>", parse_mode="HTML")
     # Selecting as well as connecting: a provider you just logged into is
     # almost certainly the one you want to shop from, and needing two commands
     # to get there is a papercut.
     await commerce.select(chat_id, provider)
     result = await commerce.connect(chat_id, provider)
-    await msg.edit_text(result)
+    await msg.edit_text(result, parse_mode="HTML")
 
 
 @authorized
@@ -1871,17 +1890,17 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /search <product>\nExample: /search milk")
         return
     await typing(update)
-    msg = await update.message.reply_text(f"Searching for '{query}' ...")
+    msg = await update.message.reply_text(f"\U0001F50E <i>Searching for {query}\u2026</i>", parse_mode="HTML")
     result = await commerce.search(update.effective_chat.id, query)
     await msg.delete()
-    await reply(update.message, result)
+    await reply(update.message, result, use_html=True)
 
 
 @authorized
 async def cmd_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the shopping cart. Usage: /cart"""
     await typing(update)
-    await reply(update.message, await commerce.cart(update.effective_chat.id))
+    await reply(update.message, await commerce.cart(update.effective_chat.id), use_html=True)
 
 
 @authorized
@@ -2031,7 +2050,7 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """
     chat_id = update.effective_chat.id
     await typing(update)
-    thinking = await update.message.reply_text("Looking...")
+    thinking = await update.message.reply_text("\U0001F50E <i>Looking\u2026</i>", parse_mode="HTML")
 
     data = await commerce.assistant(chat_id, text)
     if not data.get("ok"):
@@ -2074,14 +2093,20 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text(over)
         return True
 
-    dry = "  [DRY RUN - no real order]" if intent.get("dry_run") else ""
+    dry = "\n\n\u26A0\uFE0F <i>Dry run \u2014 nothing will actually be ordered.</i>" if intent.get("dry_run") else ""
+    summary = intent.get("summary", "")
+    # The provider's own docs require the delivery address be stated before
+    # confirmation, and it is the detail a user is most likely to get wrong.
+    details = f"{summary}{dry}"
     approved = await guard.request_permission(
         context.bot, chat_id, "commerce_checkout",
-        f"place order for {intent['total_display']}{dry}",
-        intent.get("summary", ""),
+        f"place order for {intent['total_display']}",
+        details,
     )
     if not approved:
-        await update.message.reply_text("Order cancelled. Nothing was charged.")
+        await update.message.reply_text(
+            "\U0001F44D No problem \u2014 nothing ordered, nothing charged."
+        )
         return True
 
     # Re-run the turn with the money path armed, so the SAME agent that was
@@ -2090,7 +2115,7 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # {paymentMethod: "UPI", generateUPIQR: true} and never calls
     # get_payment_options -- which Swiggy's own tool documentation says it
     # rejects, and which is why no payment link came back.
-    placing = await update.message.reply_text("Placing your order...")
+    placing = await update.message.reply_text("\U0001F6F5 Placing your order\u2026")
     data = await commerce.assistant_confirmed(chat_id, _CONFIRM_TEXT)
     try:
         await placing.delete()

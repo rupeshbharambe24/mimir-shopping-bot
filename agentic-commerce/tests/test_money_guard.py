@@ -90,3 +90,34 @@ def test_swiggy_and_mock_declare_different_names():
 
     assert mock_manifest.DANGEROUS_TOOLS != swiggy_manifest.DANGEROUS_TOOLS
     assert not (mock_manifest.DANGEROUS_TOOLS & swiggy_manifest.DANGEROUS_TOOLS)
+
+
+# ── emptying the cart must actually empty it ─────────────────────
+# update_cart({"items": []}) does NOT clear a Swiggy cart: the call succeeds and
+# the cart comes back unchanged, so the caller is told it worked. On a shopping
+# flow that means the user adds to a basket they believe is empty and orders
+# more than they intended. Providers expose a dedicated tool; these assert every
+# adapter has one and that it works.
+
+def test_every_provider_can_actually_clear_its_cart():
+    for entry in registry.load_registry():
+        if not entry.enabled:
+            continue
+        adapter = registry.build_adapter(entry)
+        assert hasattr(adapter, "clear_cart"), (
+            f"{entry.id} has no clear_cart, so emptying falls back to "
+            f"update_cart([]) -- which reports success without clearing."
+        )
+
+
+async def test_mock_clear_cart_empties_the_cart():
+    from backend.canonical.types import CanonicalCartItem, Money
+
+    adapter = MockAdapter()
+    await adapter.connect()
+    await adapter.update_cart([CanonicalCartItem("MOCK-MILK", "Toned Milk", 2, Money(3300))])
+    assert (await adapter.get_cart()).items, "fixture problem: cart should have an item"
+
+    after = await adapter.clear_cart()
+    assert after.items == [], "clear_cart left items behind"
+    assert (await adapter.get_cart()).items == [], "cart re-read is not empty"

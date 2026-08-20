@@ -94,41 +94,32 @@ async def health(chat_id: int) -> dict[str, Any]:
 async def providers(chat_id: int) -> str:
     data = await _request("GET", "/providers", chat_id)
     if "providers" not in data:
-        return _err(data) or "Commerce error: malformed /providers response."
-    lines = ["COMMERCE PROVIDERS", ""]
+        return _err(data) or "Something went wrong reading the store list."
+
     selected = data.get("selected")
+    lines = ["\U0001F3EA <b>Stores</b>", ""]
     for p in data["providers"]:
-        mark = "*" if p["id"] == selected else " "
-        state = "connected" if p["connected"] else (
-            "not connected" if p["auth_type"] != "none" else "no auth needed"
+        if p["id"] == selected:
+            mark, suffix = "\U0001F535", "  \u2190 <i>using this one</i>"
+        else:
+            mark, suffix = "\u26AA", ""
+        state = (
+            "connected" if p["connected"]
+            else ("tap /connect " + p["id"] if p["auth_type"] != "none" else "ready")
         )
-        lines.append(f" {mark} {p['display_name']}  [{p['id']}]  -- {state}")
-        flags = p.get("flags", {})
-        caps = []
-        if flags.get("supports_cart"):
-            caps.append("cart")
-        if flags.get("supports_checkout"):
-            caps.append("checkout")
-        if flags.get("searchable_without_auth"):
-            caps.append("anonymous search")
-        cap = flags.get("max_order_value")
-        if cap:
-            caps.append(f"max order Rs.{cap / 100:.0f}")
-        if caps:
-            lines.append(f"      {', '.join(caps)}")
-    if selected:
+        lines.append(f"{mark} <b>{p['display_name']}</b>{suffix}")
+        lines.append(f"     <i>{state}</i>")
         lines.append("")
-        lines.append(f"Selected: {selected}  (* marks it)")
-    else:
-        lines.append("")
-        lines.append("No provider selected yet.")
-    return "\n".join(lines)
+
+    if not selected:
+        lines.append("<i>Tell me which store to use, or /connect one.</i>")
+    return "\n".join(lines).rstrip()
 
 
 async def select(chat_id: int, provider_id: str) -> str:
     data = await _request("POST", f"/providers/{provider_id}/select", chat_id)
     err = _err(data)
-    return err or f"Selected provider '{data.get('selected')}'."
+    return err or f"\U0001F3EA Now shopping at <b>{data.get('selected')}</b>."
 
 
 async def connect(chat_id: int, provider_id: str) -> str:
@@ -142,7 +133,7 @@ async def connect(chat_id: int, provider_id: str) -> str:
             "Mac itself and must be completed there. Use /remote for a remote "
             "desktop link if you are away from the machine."
         )
-    return f"Connected: {', '.join(data.get('connected', []))}"
+    return f"\u2705 Connected to <b>{provider_id}</b>. What are you after?"
 
 
 async def search(chat_id: int, query: str) -> str:
@@ -159,38 +150,37 @@ async def search(chat_id: int, query: str) -> str:
     data = await _request("POST", "/search", chat_id, {"query": query}, timeout=_SLOW_TIMEOUT)
 
     if not data.get("ok"):
-        status = data.get("status")
-        if status == "needs_connection":
+        if data.get("status") == "needs_connection":
             return (
-                f"Not connected to the store yet. Use /connect swiggy "
-                f"(or ask me to connect) and try again."
+                "\U0001F510 I'm not logged in to that store yet.\n"
+                "Run <code>/connect swiggy</code> and I'll try again."
             )
-        return f"Search failed: {data.get('error') or status or 'unknown error'}"
+        return f"\u26A0\uFE0F Couldn't search: {data.get('error') or data.get('status') or 'unknown error'}"
 
     items = data.get("items") or []
     if not items:
-        return f"No results for '{query}'."
+        return f"Nothing came back for <b>{query}</b>. Try a different word?"
 
     in_stock = [i for i in items if i.get("available", True)]
     out_of_stock = [i for i in items if not i.get("available", True)]
 
-    lines = [f"Results for '{query}':", ""]
-    for item in in_stock[:10]:
-        unit = f"  ({item['unit']})" if item.get("unit") else ""
-        lines.append(f"  {item['price_display']:>10}  {item['name']}{unit}")
-        lines.append(f"              id: {item['product_id']}")
-    if out_of_stock:
+    lines = [f"\U0001F50D <b>{query}</b>", ""]
+    for item in in_stock[:8]:
+        unit = f" <i>({item['unit']})</i>" if item.get("unit") else ""
+        lines.append(f"<b>{item['price_display']}</b>  \u2014  {item['name']}{unit}")
+        lines.append(f"<code>{item['product_id']}</code>")
         lines.append("")
-        lines.append(f"  ({len(out_of_stock)} more out of stock)")
 
-    # Priced, in-stock items only. A provider can legitimately return an item
-    # with no price; ranking None against an int is what crashed before.
+    if out_of_stock:
+        lines.append(f"<i>\u2026and {len(out_of_stock)} out of stock</i>")
+        lines.append("")
+
     priced = [i["price_minor"] for i in in_stock if i.get("price_minor") is not None]
     if priced:
-        lines.append("")
-        lines.append(f"Cheapest in stock: Rs.{min(priced) / 100:.2f}")
-
-    return "\n".join(lines)
+        lines.append(f"\U0001F4B0 Cheapest in stock: <b>\u20B9{min(priced) / 100:.2f}</b>")
+    lines.append("")
+    lines.append("<i>Say which one you want and how many.</i>")
+    return "\n".join(lines).rstrip()
 
 
 async def cart(chat_id: int) -> str:
@@ -202,13 +192,23 @@ async def cart(chat_id: int) -> str:
 
 def _format_cart(c: dict[str, Any]) -> str:
     if not c.get("items"):
-        return "Cart is empty."
-    lines = [f"CART ({c['provider_id']})", ""]
+        return (
+            "\U0001F6D2 Your cart is empty.\n\n"
+            "<i>Tell me what you're after and I'll find it.</i>"
+        )
+    lines = ["\U0001F6D2 <b>Your cart</b>", ""]
     for item in c["items"]:
-        lines.append(f"  {item['quantity']} x {item['name']}  @ {item['price_display']}")
+        lines.append(f"  <b>{item['quantity']}\u00D7</b>  {item['name']}")
+        lines.append(f"       <i>{item['price_display']} each</i>")
     lines.append("")
-    lines.append(f"  Subtotal: {c.get('subtotal_display', '-')}")
-    lines.append(f"  Total:    {c.get('total_display', '-')}")
+    lines.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+    # The store's own itemised bill, so the jump from basket to total is
+    # explained rather than just asserted.
+    for line in c.get("bill_lines") or []:
+        lines.append(f"{line['label']}   {line['value']}")
+    if not c.get("bill_lines") and c.get("subtotal_display") != c.get("total_display"):
+        lines.append(f"Subtotal   {c.get('subtotal_display', '')}")
+    lines.append(f"<b>To pay    {c.get('total_display', '\u2014')}</b>")
     return "\n".join(lines)
 
 
@@ -232,14 +232,25 @@ async def add_to_cart(
     data = await _request("POST", "/cart/add", chat_id, payload)
     if err := _err(data):
         return err
-    return "Added to cart.\n\n" + _format_cart(data["cart"])
+
+    head = "\u2705 <b>Added.</b>"
+    # Say so when the store gave less than was asked for, and why. It caps
+    # against live stock rather than refusing, so the difference is otherwise
+    # invisible until the total looks wrong.
+    for short in data.get("shortfalls") or []:
+        reason = short.get("reason") or "that's all they had in stock"
+        head = (
+            f"\u26A0\uFE0F <b>Only {short['granted']} available</b> "
+            f"(you asked for {short['requested']})\n<i>{reason}</i>"
+        )
+    return head + "\n\n" + _format_cart(data["cart"])
 
 
 async def clear_cart(chat_id: int) -> str:
     data = await _request("POST", "/cart/set", chat_id, {"items": []})
     if err := _err(data):
         return err
-    return "Cart cleared."
+    return "\U0001F5D1 Cart emptied."
 
 
 # ── conversational shopping ──────────────────────────────────────
@@ -284,22 +295,26 @@ async def checkout(chat_id: int, confirm_token: str) -> str:
     data = await _request("POST", "/checkout", chat_id, {"confirm_token": confirm_token})
     if err := _err(data):
         return err
-    tag = "  [DRY RUN - no real order]" if data.get("dry_run") else ""
-    return (
-        f"Order created: {data['order_id']}\n"
-        f"Status: {data['status']}{tag}\n"
-        + (f"Authorize payment here: {data['authorization_url']}\n"
-           if data.get("authorization_url") else "")
-        + f"\nUse commerce_order_status with order_id={data['order_id']} to follow it."
-    )
+    dry = "\n\n<i>\u26A0\uFE0F Dry run \u2014 no real order was placed.</i>" if data.get("dry_run") else ""
+    out = [f"\U0001F9FE <b>Order {data['order_id']}</b>", f"<i>{data['status'].replace('_', ' ')}</i>"]
+    if data.get("authorization_url"):
+        out += ["", "\U0001F4B3 <b>Pay here to complete it:</b>", data["authorization_url"]]
+    out += ["", "<i>Ask me \u201cwhere's my order?\u201d any time.</i>" + dry]
+    return "\n".join(out)
 
 
 async def payment_status(chat_id: int, order_id: str) -> str:
     data = await _request("GET", f"/payment/{order_id}", chat_id, timeout=_SLOW_TIMEOUT)
     if err := _err(data):
         return err
-    tag = "  [DRY RUN]" if data.get("dry_run") else ""
-    return f"Order {data['order_id']}: {data['status']}  {data.get('total_display', '')}{tag}"
+    icon = {"placed": "\u2705", "failed": "\u274C", "cancelled": "\U0001F6AB"}.get(
+        data["status"], "\u23F3"
+    )
+    tag = "  <i>(dry run)</i>" if data.get("dry_run") else ""
+    return (
+        f"{icon} <b>Order {data['order_id']}</b>\n"
+        f"{data['status'].replace('_', ' ').title()}  \u00B7  {data.get('total_display', '')}{tag}"
+    )
 
 
 async def over_spending_cap(total_minor: Optional[int]) -> Optional[str]:

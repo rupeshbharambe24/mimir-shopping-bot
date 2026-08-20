@@ -114,12 +114,28 @@ def cart_fingerprint(cart: CanonicalCart) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
+def bill_lines(cart: CanonicalCart) -> list[dict[str, str]]:
+    """The provider's own itemised bill, as label/value pairs.
+
+    Worth surfacing rather than showing only a total: a Rs.21 basket can come to
+    Rs.86 once handling and delivery are added, and a confirmation screen that
+    shows only the final number gives the user no way to see why.
+    """
+    bill = cart.bill_breakdown or {}
+    out: list[dict[str, str]] = []
+    for line in bill.get("lineItems") or []:
+        if isinstance(line, dict) and line.get("label"):
+            out.append({"label": str(line["label"]), "value": str(line.get("value", ""))})
+    return out
+
+
 def cart_to_json(cart: CanonicalCart) -> dict[str, Any]:
     return {
         "provider_id": cart.provider_id,
         "subtotal_display": cart.subtotal.display(),
         "total_display": cart.total.display(),
         "total_minor": cart.total.minor_units,
+        "bill_lines": bill_lines(cart),
         "items": [
             {
                 "product_id": i.product_id,
@@ -134,11 +150,19 @@ def cart_to_json(cart: CanonicalCart) -> dict[str, Any]:
 
 
 def cart_summary_text(cart: CanonicalCart) -> str:
-    """One-glance description for a confirmation prompt."""
+    """One-glance description for a confirmation prompt.
+
+    Includes the provider's itemised bill when it gives one: the difference
+    between a Rs.21 basket and a Rs.86 total is entirely fees, and the person
+    tapping Approve should be able to see that rather than wonder.
+    """
     if not cart.items:
         return "(empty cart)"
     lines = [f"{i.quantity} x {i.name} @ {i.price.display()}" for i in cart.items]
-    return "\n".join(lines) + f"\nTotal: {cart.total.display()}"
+    for line in bill_lines(cart):
+        lines.append(f"{line['label']}: {line['value']}")
+    lines.append(f"Total: {cart.total.display()}")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -380,6 +404,13 @@ async def set_cart(body: CartWrite, request: Request, response: Response):
     if err:
         return err
     try:
+        if not body.items:
+            # Emptying is not "update to an empty list": Swiggy's update_cart
+            # silently ignores that and returns the cart unchanged, so the caller
+            # is told it worked. Providers expose a dedicated tool; use it.
+            clear = getattr(adapter, "clear_cart", None)
+            if clear is not None:
+                return {"ok": True, "cart": cart_to_json(await clear())}
         cart = await adapter.update_cart(_to_canonical_items(body.items))
         return {"ok": True, "cart": cart_to_json(cart)}
     except Exception as e:
@@ -417,7 +448,28 @@ async def add_to_cart(body: CartWrite, request: Request, response: Response):
             else:
                 merged[line.product_id] = line
         cart = await adapter.update_cart(list(merged.values()))
-        return {"ok": True, "cart": cart_to_json(cart)}
+        result = {"ok": True, "cart": cart_to_json(cart)}
+
+        # Providers cap quantities against live stock and say so in the payload
+        # rather than failing the call. Swiggy returns quantity=1 with
+        # maxQuantityMessage "That's all we have in stock at the moment!" for a
+        # request of 3. Quietly returning a smaller cart than was asked for is
+        # the wrong outcome for something the user is about to pay for.
+        granted = {i.product_id: i.quantity for i in cart.items}
+        shortfalls = []
+        for line in _to_canonical_items(body.items):
+            want = merged[line.product_id].quantity
+            got = granted.get(line.product_id, 0)
+            if got < want:
+                shortfalls.append({
+                    "product_id": line.product_id,
+                    "requested": want,
+                    "granted": got,
+                    "reason": _stock_note(cart, line.product_id),
+                })
+        if shortfalls:
+            result["shortfalls"] = shortfalls
+        return result
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -465,6 +517,16 @@ async def search_selected(body: SearchRequest, request: Request, response: Respo
             for p in result.items[: body.limit]
         ],
     }
+
+
+def _stock_note(cart: CanonicalCart, product_id: str) -> str:
+    """The provider's own explanation for a capped quantity, if it gave one."""
+    for raw in (cart.raw or {}).get("items") or []:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("spinId") or raw.get("skuId") or "") == product_id:
+            return str(raw.get("maxQuantityMessage") or "").strip()
+    return ""
 
 
 @app.post("/checkout/intent")

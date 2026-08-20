@@ -208,6 +208,20 @@ class SwiggyAdapter:
         result = await session.call_tool(manifest.TOOL_MAP["update_cart"], payload)
         return manifest.parse_cart(_as_payload(result))
 
+    async def clear_cart(self) -> CanonicalCart:
+        """Empty the cart using the provider's dedicated tool.
+
+        update_cart({"items": []}) does NOT clear a Swiggy cart -- the call
+        succeeds and the cart comes back unchanged, so a caller emptying it that
+        way is told the cart is empty when it is not. Swiggy exposes a separate
+        clear_cart tool for this; it was mapped in the manifest but never
+        called. Getting this wrong on a shopping flow means the user adds to a
+        basket they believe is empty and orders more than they intended.
+        """
+        session = self._require_session()
+        await session.call_tool(manifest.TOOL_MAP["clear_cart"], {})
+        return await self.get_cart()
+
     async def checkout(self, confirm_token: str) -> CanonicalPaymentIntent:
         if not self.capability_flags.supports_checkout:
             raise NotSupported(f"{self.id} does not support checkout")

@@ -8,6 +8,7 @@ rather than exceptions or the model cannot recover from them.
 
 import logging
 import os
+import re
 from pathlib import Path
 
 from core import paths, platform as host, session
@@ -367,10 +368,25 @@ else:
     ] + _COMMERCE_SCHEMAS
 
 
+_TAG = re.compile(r"</?[a-zA-Z][^>]*>")
+
+
+def _strip_markup(text: str) -> str:
+    """Drop HTML tags from a tool result.
+
+    The commerce helpers format for Telegram, where <b> and <code> render. A
+    tool result goes somewhere else entirely -- into the model's prompt -- where
+    the same tags are wasted tokens and get echoed back to the user as literal
+    text. Rendering and reasoning want different strings from one function.
+    """
+    return _TAG.sub("", text)
+
+
 async def execute(name: str, args: dict, chat_id: int) -> str:
     """Run a tool and return a string result. Never raises."""
     try:
-        return await _dispatch(name, args or {}, chat_id)
+        result = await _dispatch(name, args or {}, chat_id)
+        return _strip_markup(result) if name.startswith("commerce_") else result
     except Exception as exc:
         logger.exception(f"Tool {name} failed")
         return f"Tool '{name}' failed: {type(exc).__name__}: {exc}"

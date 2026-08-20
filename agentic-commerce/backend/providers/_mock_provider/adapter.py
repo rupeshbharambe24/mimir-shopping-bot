@@ -139,6 +139,10 @@ class MockAdapter:
         ]
         return manifest.parse_cart(self._raw_cart())
 
+    async def clear_cart(self) -> CanonicalCart:
+        self._cart_lines.clear()
+        return await self.get_cart()
+
     async def checkout(self, confirm_token: str) -> CanonicalPaymentIntent:
         if not self.capability_flags.supports_checkout:
             raise NotSupported(f"{self.id} does not support checkout")

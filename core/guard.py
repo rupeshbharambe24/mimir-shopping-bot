@@ -43,16 +43,30 @@ class Guard:
         self._pending[action_id] = future
         self._descriptions[action_id] = description
 
-        text = f"PERMISSION REQUIRED\n\nAction: {description}"
-        if details:
-            text += f"\nDetails:\n{details[:500]}"
+        # Money asks get a different frame from ordinary write asks: the user is
+        # being shown a basket and a number, not a filesystem action.
+        is_purchase = operation == "commerce_checkout"
+        if is_purchase:
+            text = "\U0001F512 <b>Confirm your order</b>\n\n"
+            if details:
+                text += f"{details[:900]}\n\n"
+            text += (
+                "<i>Tap Place order and I'll go ahead.\n"
+                "Nothing is charged until you do.</i>"
+            )
+            yes_label, no_label = "\u2705 Place order", "\u2716 Cancel"
+        else:
+            text = f"\u26A0\uFE0F <b>Permission needed</b>\n\n{description}"
+            if details:
+                text += f"\n\n<code>{details[:500]}</code>"
+            yes_label, no_label = "\u2705 Allow", "\u2716 Deny"
 
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Approve", callback_data=f"perm:y:{action_id}"),
-            InlineKeyboardButton("Deny", callback_data=f"perm:n:{action_id}"),
+            InlineKeyboardButton(yes_label, callback_data=f"perm:y:{action_id}"),
+            InlineKeyboardButton(no_label, callback_data=f"perm:n:{action_id}"),
         ]])
 
-        await bot.send_message(chat_id, text, reply_markup=keyboard)
+        await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
         logger.info(f"Permission requested: {description} [{action_id}]")
 
         try:
@@ -60,7 +74,12 @@ class Guard:
             return result
         except asyncio.TimeoutError:
             self._cleanup(action_id)
-            await bot.send_message(chat_id, f"Permission timed out - {description} denied.")
+            await bot.send_message(
+                chat_id,
+                "\u23F1 That request timed out, so I left it alone.\n"
+                "<i>Ask again whenever you're ready.</i>",
+                parse_mode="HTML",
+            )
             logger.warning(f"Permission timeout: {description} [{action_id}]")
             return False
 
@@ -91,8 +110,11 @@ class Guard:
 
         status = "APPROVED" if approved else "DENIED"
         try:
-            await query.answer(status)
-            await query.edit_message_text(f"[{status}] {desc}")
+            await query.answer("Done" if approved else "Cancelled")
+            mark = "\u2705" if approved else "\u2716"
+            verb = "Confirmed" if approved else "Cancelled"
+            await query.edit_message_text(f"{mark} <b>{verb}</b>\n<i>{desc}</i>",
+                                          parse_mode="HTML")
         except Exception:
             pass
         logger.info(f"Permission {status.lower()}: {desc} [{action_id}]")
