@@ -179,6 +179,68 @@ gating, and what the user is shown before money moves.
 
 ---
 
+## 2026-08-20 (later) — the Telegram integration was making the bot worse
+
+Reported from live use: `commerce_compare` crashing every turn, and the rich
+behaviour that worked standalone (offer a list of biscuits to pick from,
+suggest what goes into a samosa) had disappeared.
+
+**Crash.** `TypeError: '<' not supported between 'NoneType' and 'int'` in
+`tools/commerce.py`. `cheapest_by_provider()` returns `None` for a provider
+that is connected and returns items where every item is out of stock or has no
+price. Swiggy did exactly that, and ranking `None` against an `int` raised. The
+model then retried the failing tool until it exhausted both its iteration
+budget and the Groq rate limit. This was code added for the integration; the
+standalone system never had it.
+
+**The real regression, and a design error.** The canonical `ProviderAdapter`
+surface (ADR-2) exposes what is *comparable across providers* — search, cart,
+checkout. Swiggy's MCP server actually exposes **14 tools**, including
+`your_go_to_items`, `get_orders`, `track_order`, `get_payment_options`,
+`get_addresses` and `clear_cart`. `backend/agent/loop.py` fed Gemini all 14,
+which is why it worked well. The integration fed a Groq-driven loop only the 9
+canonical wrappers, discarding most of the provider's capability. A canonical
+layer is the right abstraction for a price table and the wrong one for a
+conversation.
+
+It could not be fixed by handing the raw tools to Groq either: their schemas
+total ~5,367 tokens per call against Groq's free-tier 8,000/minute.
+
+**Fix.** `POST /agent/message` on the BFF exposes the existing Gemini loop over
+REST. Plain Telegram messages are routed there, so the assistant drives the
+provider's real tools again. Mimir keeps the one decision the loop must not
+make alone: when the loop is blocked on confirmation, Mimir mints a cart-bound
+intent, shows the line items and total, and waits for the Approve tap.
+
+`commerce_compare` is gone. `commerce_search` searches the selected provider
+(`POST /search`). Comparison belongs to a setup with more than one real
+provider; with one it spends round trips on providers that answer
+`needs_connection` and reports a "cheapest" that compares nothing.
+
+**Also:** the two-switch interlock proved itself — `DRY_RUN` had been flipped
+back to `false` in agentic-commerce's `.env`, and `COMMERCE_ALLOW_LIVE=false`
+refused the spend.
+
+---
+
+## 2026-08-20 — rebrand to Mimir, shopping-first
+
+- RAVEN -> MIMIR everywhere: 134 occurrences across 21 files, plus filenames
+  (`start-mimir.sh`, `com.mimir.*.plist.template`), launchd labels, the
+  `MIMIR_OPEN_PATH`/`MIMIR_SHOT_PATH` env vars and the `mimir-<chat_id>`
+  session key. Note: a blind rename first produced "a mimir delivering exactly
+  what's needed" and "bird/mimir metaphors" — Mimir is the Norse keeper of the
+  well of wisdom, not a bird. The persona was rewritten by hand.
+- Persona, `/start` and `/help` are a shopping assistant, not a machine
+  controller.
+- `BOT_MODE` (default `shopping`) keeps the developer tools out of the LLM's
+  tool set; they remain available as slash commands. `BOT_MODE=full` restores
+  them. This halves the per-iteration schema cost (1,644 -> 807 tokens), which
+  was a direct cause of mid-order rate limiting.
+- `/compare` -> `/search`.
+
+---
+
 ## Test status
 
 | Suite | Result |
