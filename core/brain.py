@@ -1,5 +1,8 @@
+import os
 import re
 import logging
+
+from core import platform as host
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +49,6 @@ _PATTERNS = [
     (r"\b(fix|solve|debug|repair|diagnose)\b", "fix_error"),
 ]
 
-# Map natural language drive references to WSL mount paths
-_DRIVE_PATTERNS = [
-    (r"\b([a-zA-Z])\s*drive\b", lambda m: f"/mnt/{m.group(1).lower()}"),
-    (r"\b([a-zA-Z]):\s*[/\\]", lambda m: f"/mnt/{m.group(1).lower()}/"),
-    (r"\b([a-zA-Z]):\\", lambda m: f"/mnt/{m.group(1).lower()}/"),
-]
-
-
 def classify(text: str) -> tuple[str, str]:
     """Classify free text into (intent, extracted_arg). Falls back to ask_llm."""
     lower = text.lower().strip()
@@ -82,12 +77,16 @@ def _extract_directory(text: str) -> str:
     """Extract a directory path from natural language."""
     lower = text.lower()
 
+    home = re.search(r"(~/[\w./-]+|~)(?=\s|$)", text)
+    if home:
+        return os.path.expanduser(home.group(1))
+
     for pat in (r"(/mnt/[\w./-]+)", r"([A-Za-z]:[\\w./\\-]+)"):
         m = re.search(pat, text)
         if m:
             return m.group(1)
 
-    drive_match = re.search(r"\b([a-zA-Z])\s*drive\b", lower)
+    drive_match = None if host.IS_MAC else re.search(r"\b([a-zA-Z])\s*drive\b", lower)
     drive_base = f"/mnt/{drive_match.group(1).lower()}" if drive_match else ""
 
     folder_parts = []
@@ -137,19 +136,21 @@ def _extract_filename_query(text: str) -> str:
     return cleaned
 
 
-import os as _os
-_Config_WORKSPACE = _os.getenv("WORKSPACE", ".")
+_Config_WORKSPACE = os.getenv("WORKSPACE", ".")
 
 
 def _extract_path(text: str) -> str:
     """Try to pull a file/dir path out of the message."""
+    home = re.search(r"(~/[\w./-]+|~)(?=\s|$)", text)
+    if home:
+        return os.path.expanduser(home.group(1))
     for pat in (r"(/mnt/[\w./-]+)", r"(/[\w./-]+)", r"([A-Za-z]:[\\w./\\-]+)"):
         m = re.search(pat, text)
         if m:
             return m.group(1)
 
     lower = text.lower()
-    drive_match = re.search(r"\b([a-zA-Z])\s*drive\b", lower)
+    drive_match = None if host.IS_MAC else re.search(r"\b([a-zA-Z])\s*drive\b", lower)
     if drive_match:
         base = f"/mnt/{drive_match.group(1).lower()}"
         path_match = re.search(r"[\w]+[/\\][\w/\\]+", text)

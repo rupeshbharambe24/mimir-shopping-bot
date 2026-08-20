@@ -20,8 +20,9 @@ from core.guard import Guard
 from core.llm_cascade import SmartLLM
 from core.notebook import NotebookManager
 from core import brain, agent, paths, session
+from core import platform as host
 from core.monitor import ProcessMonitor
-from tools import file_ops, process_ops, screenshot, system_info, git_ops
+from tools import commerce, file_ops, process_ops, screenshot, system_info, git_ops
 
 logger = logging.getLogger(__name__)
 
@@ -32,54 +33,64 @@ notebook_mgr = NotebookManager()
 
 MAX_MSG = 4000  # Telegram limit is 4096, leave headroom
 
+# Examples shown in help text. They have to match the machine the user is on:
+# a Mac user told to type "d drive projects" will type it, and get nothing.
+if host.IS_MAC:
+    _EXAMPLE_DIR = "~/Projects"
+    _EXAMPLE_PYTHON = "~/.venvs/ml/bin/python"
+    _EXAMPLE_PHRASE = "go to my projects folder and list the folders"
+    _PATH_HELP = (
+        "Paths accept /Users/you/Projects, ~/Projects, or a name\n"
+        "relative to the current folder. /ls and /tree with no\n"
+        "argument use the current folder."
+    )
+else:
+    _EXAMPLE_DIR = "/mnt/d/projects"
+    _EXAMPLE_PYTHON = "/mnt/d/commonenv/Scripts/python.exe"
+    _EXAMPLE_PHRASE = "go to d drive projects and list the folders"
+    _PATH_HELP = (
+        "Paths accept any spelling: D:\\Projects, D:/Projects,\n"
+        "/mnt/d/Projects, 'd drive projects', or a name relative\n"
+        "to the current folder. /ls and /tree with no argument use\n"
+        "the current folder."
+    )
+
+
 # ── Persona system ────────────────────────────────────────────────
 
 _AGENT_CONTEXT = (
-    "You have full control of the user's development machine via WSL2 and can run commands, "
-    "manage files, execute notebooks, and monitor processes. "
-    "Keep responses brief and actionable. When reporting status, use structured formatting."
+    "You help the user shop: finding products, comparing what is in stock, "
+    "building a cart and placing orders. You can also send them files and "
+    "report your own status. Keep replies short - they are read on a phone. "
+    "Show prices and quantities plainly."
 )
 
 PERSONAS = {
-    "raven": (
-        "You are RAVEN, a sharp and efficient AI agent. "
-        "Precise, direct, and darkly witty — like a raven delivering exactly what's needed. "
-        "No fluff. Occasionally use bird/raven metaphors when it fits naturally "
-        "(e.g., 'scouting the directory', 'perched and ready') but don't force it. "
+    "mimir": (
+        "You are Mimir, a sharp and efficient shopping assistant. "
+        "Named for the Norse keeper of the well of wisdom: you give straight "
+        "counsel, not sales patter. Direct, no fluff, occasionally dry. "
+        "You never pressure the user into buying anything. "
         + _AGENT_CONTEXT
     ),
     "formal": (
-        "You are a professional AI assistant. Respond in a clear, structured, business-appropriate tone. "
-        "No humor, no metaphors, just precise and helpful information. "
+        "You are a professional shopping assistant. Clear, structured and "
+        "business-appropriate. No humour, just precise and helpful information. "
         + _AGENT_CONTEXT
     ),
-    "mentor": (
-        "You are a patient and encouraging mentor. Explain things step by step, "
-        "anticipate what the user might not understand, and teach as you go. "
-        "Use analogies to make complex things simple. Celebrate small wins. "
+    "friendly": (
+        "You are a warm, upbeat shopping assistant. Conversational and helpful, "
+        "like a good shop assistant who knows the stock. Never pushy. "
         + _AGENT_CONTEXT
     ),
-    "brutal": (
-        "You are extremely blunt. No sugar coating, no pleasantries. "
-        "Point out mistakes directly. If something is wrong, say it's wrong and why. "
-        "Short, sharp answers. Don't waste words. "
-        + _AGENT_CONTEXT
-    ),
-    "pirate": (
-        "You are a pirate AI. Speak in nautical terms and pirate slang. "
-        "Files are 'scrolls', directories are 'ports', errors are 'shipwrecks', "
-        "running code is 'setting sail'. Keep it fun but still actually helpful. "
-        + _AGENT_CONTEXT
-    ),
-    "zen": (
-        "You are a calm, zen-like AI. Respond with wisdom and tranquility. "
-        "Use minimalist language. Frame errors as learning opportunities. "
-        "Occasionally offer a short philosophical observation. Never rush. "
+    "brief": (
+        "You are extremely concise. Answer in as few words as possible. "
+        "Prices and product names, nothing else unless asked. "
         + _AGENT_CONTEXT
     ),
 }
 
-DEFAULT_PERSONA = "raven"
+DEFAULT_PERSONA = "mimir"
 
 # File to persist persona across restarts
 _PERSONA_FILE = Config.WORKSPACE / ".persona"
@@ -219,7 +230,7 @@ async def _handle_send_file(update: Update, search_info: str, context=None):
         await update.message.reply_text(
             "I couldn't figure out which file you want.\n"
             "Try: /send <exact-path>\n"
-            "Or describe it more: 'send me the report.pptx from /mnt/d/projects'"
+            f"Or describe it more: 'send me the report.pptx from {_EXAMPLE_DIR}'"
         )
         return
 
@@ -293,78 +304,38 @@ def _dir_arg(update, context) -> str:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await typing(update)
     await update.message.reply_text(
-        "[ RAVEN ONLINE ]\n"
-        "━━━━━━━━━━━━━━━━━\n\n"
-        "Perched and ready.\n"
-        "All systems operational.\n\n"
-        "Send /help for the command menu,\n"
-        "or just tell me what you need.\n\n"
-        "Read ops  =  auto-allowed\n"
-        "Write ops =  requires your approval"
+        "Hi, I'm Mimir - your shopping assistant.\n\n"
+        "Tell me what you need in plain English:\n"
+        "  \"do we have milk and bread\"\n"
+        "  \"add 2 litres of milk to my cart\"\n"
+        "  \"what's in my cart?\"\n\n"
+        "I'll always show you the full cart and total,\n"
+        "and you tap Approve before anything is ordered.\n\n"
+        "/help for everything I can do."
     )
 
 
 @authorized
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply(update.message,
-        "COMMANDS\n\n"
-        "LLM:\n"
-        "  /ask <prompt>  - Ask LLM (cascade)\n"
-        "  /code <prompt> - Ask code model\n\n"
-        "Files:\n"
-        "  /read <path>   - Read file [auto]\n"
-        "  /ls <path>     - List directory [auto]\n"
-        "  /send <path>   - Send file to you [auto]\n"
-        "  /write <path>  - Write file [approval]\n"
-        "  /delete <path> - Delete file [approval]\n"
-        "  /find <name>   - Search for files [auto]\n"
-        "  /tree <path>   - Directory tree [auto]\n"
-        "  /recent <path> - Recently modified files [auto]\n\n"
-        "Process:\n"
-        "  /run <script.py> - Run Python script [approval]\n"
-        "  /watch <script>  - Run with live output [approval]\n"
-        "  /cmd <command>   - Run shell command [approval]\n"
-        "  /tail <logfile>  - Monitor log file [auto]\n"
-        "  /procs           - Show background processes [auto]\n"
-        "  /kill <name>     - Kill background process [approval]\n"
-        "  /history         - Command history [auto]\n\n"
-        "Notebook:\n"
-        "  /nb open <path>  - Load notebook\n"
-        "  /nb run          - Run all cells [approval]\n"
-        "  /nb run 5        - Run cell 5 [approval]\n"
-        "  /nb run 5+       - Run from cell 5 onward [approval]\n"
-        "  /nb cell 5       - Show cell source\n"
-        "  /nb edit 5       - Edit cell (next msg = new content)\n"
-        "  /nb out 5        - Show cell output\n"
-        "  /nb status       - Kernel status\n"
-        "  /nb stop         - Shutdown kernel\n"
-        "  /nb env <path>   - Set Python env\n\n"
-        "Git:\n"
-        "  /commit <msg>    - Git commit [approval]\n"
-        "  /diff            - Show git diff [auto]\n"
-        "  /gitlog <n>      - Recent commits [auto]\n"
-        "  /undo            - Undo last commit [approval]\n\n"
-        "System:\n"
-        "  /do <task>       - Complex multi-step task [approval]\n"
-        "  /screenshot      - Capture screen [auto]\n"
-        "  /status          - System status [auto]\n"
-        "  /models          - List Ollama models [auto]\n"
-        "  /logs            - Recent agent logs [auto]\n"
-        "  /apply           - Apply LLM-suggested fix [approval]\n\n"
-        "Navigation:\n"
-        "  /cd <path>       - Change current folder [auto]\n"
-        "  /pwd             - Show current folder [auto]\n"
-        "  /open <path>     - Open in Explorer [auto]\n\n"
-        "Paths accept any spelling: D:\\Projects, D:/Projects,\n"
-        "/mnt/d/Projects, 'd drive projects', or a name relative\n"
-        "to the current folder. /ls and /tree with no argument use\n"
-        "the current folder.\n\n"
-        "Utility:\n"
-        "  /clip <text>     - Copy to clipboard [auto]\n"
-        "  /bookmark <name> <path> - Save bookmark\n"
-        "  /go <name>       - List bookmark dir\n\n"
-        "Or just type naturally - 'go to d drive projects and list\n"
-        "the folders' works. The LLM drives the tools directly."
+        "WHAT I CAN DO\n\n"
+        "Just talk to me normally:\n"
+        "  \"find brown bread\"\n"
+        "  \"add 2 of the cheapest to my cart\"\n"
+        "  \"checkout\"\n\n"
+        "Shopping:\n"
+        "  /search <item>   - Search the store\n"
+        "  /cart            - Show your cart and total\n"
+        "  /providers       - Which stores are set up\n"
+        "  /connect <store> - Log in to a store\n\n"
+        "Orders:\n"
+        "  Checkout always shows you the cart and total,\n"
+        "  then waits for you to tap Approve. Nothing is\n"
+        "  ever ordered without that tap.\n\n"
+        "Other:\n"
+        "  /status          - Am I working?\n"
+        "  /persona <name>  - mimir | formal | friendly | brief\n"
+        "  /stop            - Shut me down"
     )
 
 
@@ -412,14 +383,14 @@ async def cmd_read(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filepath = _dir_arg(update, context)
     context.chat_data["last_file_path"] = filepath
     content = file_ops.read_file(filepath)
-    await reply(update.message, f"{paths.to_windows(filepath)}:\n\n{content}")
+    await reply(update.message, f"{paths.display(filepath)}:\n\n{content}")
 
 
 @authorized
 async def cmd_ls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dirpath = _dir_arg(update, context)
     content = file_ops.list_dir(dirpath)
-    await reply(update.message, f"{paths.to_windows(dirpath)}:\n\n{content}")
+    await reply(update.message, f"{paths.display(dirpath)}:\n\n{content}")
 
 
 @authorized
@@ -488,8 +459,10 @@ async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Otherwise, search for the file
     await typing(update)
 
-    # Extract drive hint (e.g., "from r drive" or "r drive")
-    drive_match = re.search(r"\b([a-zA-Z])\s*drive\b", raw.lower())
+    # Extract drive hint (e.g., "from r drive" or "r drive"). Drive words name
+    # nothing on a Mac, so matching them there would search a path that cannot
+    # exist instead of falling through to the all-locations search.
+    drive_match = None if host.IS_MAC else re.search(r"\b([a-zA-Z])\s*drive\b", raw.lower())
     if drive_match:
         search_dir = f"/mnt/{drive_match.group(1).lower()}"
         # Remove drive reference from search query
@@ -582,7 +555,7 @@ async def cmd_tree(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show directory tree. Usage: /tree <path> or /tree (current folder)"""
     dirpath = _dir_arg(update, context)
     result = file_ops.tree(dirpath)
-    await reply(update.message, f"{paths.to_windows(dirpath)}:\n\n{result}")
+    await reply(update.message, f"{paths.display(dirpath)}:\n\n{result}")
 
 
 @authorized
@@ -1020,7 +993,7 @@ async def cmd_nb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif subcmd == "env":
         if not rest:
-            await update.message.reply_text("Usage: /nb env <path/to/python>\nExample: /nb env /mnt/d/commonenv/Scripts/python.exe")
+            await update.message.reply_text(f"Usage: /nb env <path/to/python>\nExample: /nb env {_EXAMPLE_PYTHON}")
             return
         python_path = " ".join(rest)
         msg = await update.message.reply_text(f"Starting kernel with {python_path}...")
@@ -1160,14 +1133,16 @@ async def _offer_git_commit(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 @authorized
 async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Open file/folder in Windows Explorer. Usage: /open <path> or /open (current folder)"""
+    """Reveal a file/folder in the desktop file manager. Usage: /open <path>"""
     target = _dir_arg(update, context)
-    win_path = paths.to_windows(target)
-    returncode, _, stderr = await process_ops.open_in_explorer(win_path, timeout=15)
+    shown = paths.display(target)
+    returncode, _, stderr = await process_ops.open_in_explorer(
+        paths.to_native(target), timeout=15
+    )
     if returncode != 0:
-        await update.message.reply_text(f"Failed to open {win_path}: {stderr.strip()[:200]}")
+        await update.message.reply_text(f"Failed to open {shown}: {stderr.strip()[:200]}")
         return
-    await update.message.reply_text(f"Opened: {win_path}")
+    await update.message.reply_text(f"Opened: {shown}")
 
 
 @authorized
@@ -1176,7 +1151,7 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not context.args:
         await update.message.reply_text(
-            f"Current folder: {paths.to_windows(session.get_cwd(chat_id))}"
+            f"Current folder: {paths.display(session.get_cwd(chat_id))}"
         )
         return
     target = _dir_arg(update, context)
@@ -1185,22 +1160,22 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Access denied: {target}")
         return
     if not resolved.is_dir():
-        await update.message.reply_text(f"Not a directory: {paths.to_windows(str(resolved))}")
+        await update.message.reply_text(f"Not a directory: {paths.display(str(resolved))}")
         return
     session.set_cwd(chat_id, str(resolved))
-    await update.message.reply_text(f"Now in: {paths.to_windows(str(resolved))}")
+    await update.message.reply_text(f"Now in: {paths.display(str(resolved))}")
 
 
 @authorized
 async def cmd_pwd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the current folder."""
     cwd = session.get_cwd(update.effective_chat.id)
-    await update.message.reply_text(paths.to_windows(cwd))
+    await update.message.reply_text(paths.display(cwd))
 
 
 @authorized
 async def cmd_clip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Copy text to Windows clipboard. Usage: /clip <text>"""
+    """Copy text to the desktop clipboard. Usage: /clip <text>"""
     text = " ".join(context.args) if context.args else ""
     if not text:
         await update.message.reply_text("Usage: /clip <text to copy>")
@@ -1274,9 +1249,9 @@ async def cmd_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cleanly shut down the agent. Systemd will NOT restart (exit code 0)."""
     await update.message.reply_text(
-        "[ RAVEN OFFLINE ]\n"
+        "[ MIMIR OFFLINE ]\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "Going dark. Use Start RAVEN.bat to bring me back."
+        "Going dark. Use Start MIMIR.bat to bring me back."
     )
     logger.info("Clean shutdown requested via /stop command.")
     # Give Telegram time to deliver the message
@@ -1418,17 +1393,34 @@ async def cmd_remote(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_gpu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show GPU status (NVIDIA). Usage: /gpu"""
     await typing(update)
-    # Try nvidia-smi on Windows via PowerShell
-    ps_cmd = (
-        'powershell.exe -NoProfile -Command "'
-        'nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu '
-        '--format=csv,noheader,nounits"'
-    )
-    returncode, stdout, stderr = await process_ops.run_command(ps_cmd, timeout=10)
-    if returncode != 0 or not stdout.strip():
+    summary = await host.gpu_summary()
+    if not summary:
         await update.message.reply_text(
             "[ GPU STATUS ]\n━━━━━━━━━━━━━━\n\n"
-            "nvidia-smi not available or no NVIDIA GPU detected."
+            "No GPU details available on this host."
+        )
+        return
+
+    # Apple Silicon shares one memory pool between CPU and GPU and exposes no
+    # per-process utilisation without sudo, so there is no bar to draw -- the
+    # chip and its memory are the whole story.
+    if host.IS_MAC:
+        await update.message.reply_text(
+            "[ GPU STATUS ]\n━━━━━━━━━━━━━━\n\n"
+            f"{summary}\n\n"
+            "Apple Silicon uses unified memory; live GPU load requires sudo."
+        )
+        return
+
+    returncode, stdout, stderr = await process_ops.run_command(
+        'powershell.exe -NoProfile -Command "'
+        'nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu '
+        '--format=csv,noheader,nounits"',
+        timeout=10,
+    )
+    if returncode != 0 or not stdout.strip():
+        await update.message.reply_text(
+            f"[ GPU STATUS ]\n━━━━━━━━━━━━━━\n\n{summary}"
         )
         return
 
@@ -1487,12 +1479,12 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Switch or customize RAVEN's personality.
+    """Switch or customize MIMIR's personality.
 
     /persona              — show current + available
     /persona <name>       — switch to preset
     /persona set <prompt> — set custom personality
-    /persona reset        — back to default (raven)
+    /persona reset        — back to default (mimir)
     """
     args = context.args or []
 
@@ -1514,7 +1506,7 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Usage:\n"
             "  /persona <name> — switch preset\n"
             "  /persona set <your prompt> — custom\n"
-            "  /persona reset — back to raven"
+            "  /persona reset — back to mimir"
         )
         await reply(update.message, "\n".join(lines))
         return
@@ -1555,60 +1547,65 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── System commands ──────────────────────────────────────────────
 
-_PLAN_SYSTEM_PROMPT = """You are a command planner for a WSL2 (Ubuntu) agent that controls a Windows machine.
+_PLAN_SYSTEM_PROMPT = """You are a command planner for MIMIR, an agent running on {host_name}.
 
 ENVIRONMENT:
-- Running in WSL2 on Ubuntu, Windows drives at /mnt/c/ and /mnt/d/
-- Ollama LLM running on Windows at {ollama_url}
-- Can call powershell.exe for Windows tasks (open browser, etc.)
+{environment}
+- Ollama LLM reachable at {ollama_url}
 
 AVAILABLE DIRECTIVES (put each on its own line):
 - SCREENSHOT — takes a screenshot and sends it (waits for page to load)
-- SENDFILE:<wsl-path> — sends a file to the user (not SENDERFILE)
+- SENDFILE:<path> — sends a file to the user (not SENDERFILE)
 - OPENDEV — auto-detects the dev server port, opens it in browser, waits for load
 
-CRITICAL CROSS-PLATFORM RULES:
-- Projects with node_modules installed on Windows CANNOT run npm/node from WSL.
-  ALWAYS use powershell.exe for Node.js projects:
-  powershell.exe -Command "cd 'D:\\projects\\myapp'; npm run dev"
-
-- Python venvs created on Windows have Scripts/ not bin/, and have CRLF line endings.
-  Do NOT source them from bash. Use the exe directly:
-  /mnt/d/myenv/Scripts/python.exe script.py
+PLATFORM RULES:
+{shell_rules}
 
 PATH SEARCHING:
 - If the user gives a project name, ALWAYS search for it first.
   Users say "prithvi ai" but folder might be "PRITHVI-AI" or "prithvi_ai".
-  Use: find /mnt/d/projects -maxdepth 2 -iname "*prithvi*" -type d 2>/dev/null | head -1
+  Use: {search_example}
   Then use the ACTUAL path found. Abort with exit 1 if not found.
 - NEVER guess folder names. Search first, use what you find.
-- When passing WSL paths to powershell.exe, convert /mnt/X/... to X:\\...:
-  drive=$(echo "$wsl_path" | cut -c6 | tr a-z A-Z)
-  rest=$(echo "$wsl_path" | cut -c8-)
-  win_path="$drive:\\$rest"
-  powershell.exe -Command "cd '$win_path'; npm run dev"
 
 RULES:
 - Output ONLY a bash script. No explanations, no markdown fences.
 - The script runs as a SINGLE bash script, so cd and env vars persist.
-- For dev servers that run forever, start via powershell and background it:
-  powershell.exe -Command "cd 'D:\\path'; npm run dev" &
-  sleep 15
+- For dev servers that run forever, start them backgrounded:
+  {dev_server_example}
 - NEVER EVER hardcode a port number (no localhost:3000, no localhost:8080, nothing).
   ALWAYS use OPENDEV — it auto-detects which port the dev server actually started on.
-- NEVER use powershell.exe Start-Process with a URL. OPENDEV handles opening the browser.
+- NEVER open a URL yourself. OPENDEV handles opening the browser.
 - After OPENDEV, use SCREENSHOT to capture the page.
 - CRITICAL: OPENDEV and SCREENSHOT MUST be at the TOP LEVEL of the script.
   NEVER put them inside if/else, for/done, or while/done blocks.
   If the path search fails, use exit 1 to abort. Example:
-    project_path=$(find /mnt/d/projects -maxdepth 2 -iname "*name*" -type d 2>/dev/null | head -1)
+    project_path=$(SEARCH_COMMAND_HERE)
     [ -z "$project_path" ] && echo "Project not found" && exit 1
-    powershell.exe -Command "cd '$project_path'; npm run dev" &
+    START_DEV_SERVER_HERE
     sleep 15
     OPENDEV
     SCREENSHOT
 - Keep it minimal — only the commands needed.
 """
+
+
+def _plan_prompt() -> str:
+    """The planner prompt, filled in for whichever host MIMIR is on.
+
+    Previously this described WSL2 unconditionally and told the model to shell
+    out to powershell.exe. On a Mac that produced plans that were syntactically
+    fine and completely unrunnable, so the description of the machine is bound
+    to core.platform rather than hardcoded.
+    """
+    return _PLAN_SYSTEM_PROMPT.format(
+        host_name=host.NAME,
+        environment=host.ENVIRONMENT,
+        ollama_url=Config.OLLAMA_URL,
+        shell_rules=host.SHELL_RULES,
+        search_example=host.SEARCH_EXAMPLE,
+        dev_server_example=host.DEV_SERVER_EXAMPLE,
+    )
 
 
 def _extract_url_from_output(text: str) -> str | None:
@@ -1634,80 +1631,13 @@ def _extract_url_from_output(text: str) -> str | None:
 
 
 async def _scan_open_ports() -> set[int]:
-    """Get currently open dev server ports (for before/after comparison)."""
-    ports = [3000, 3001, 5173, 5174, 4200, 8000, 8001, 5000, 5500, 4000, 1234, 8080, 8081, 8888]
-    ps_lines = [
-        "foreach ($p in @(" + ",".join(str(p) for p in ports) + ")) {",
-        "  try {",
-        "    $tcp = New-Object System.Net.Sockets.TcpClient",
-        "    $tcp.Connect('127.0.0.1', $p)",
-        "    $tcp.Close()",
-        "    Write-Output $p",
-        "  } catch {}",
-        "}",
-    ]
-    script_path = Config.WORKSPACE / "_portscan_snap.ps1"
-    script_path.write_text("\n".join(ps_lines), encoding="utf-8")
-    wsl_path = str(script_path)
-    if wsl_path.startswith("/mnt/"):
-        parts = wsl_path[5:].split("/", 1)
-        win_path = f"{parts[0].upper()}:\\{parts[1]}".replace("/", "\\")
-    else:
-        win_path = wsl_path
-    try:
-        rc, stdout, _ = await process_ops.run_powershell_file(win_path, timeout=15)
-        return {int(p.strip()) for p in stdout.strip().split("\n") if p.strip().isdigit()}
-    except Exception:
-        return set()
-    finally:
-        try:
-            script_path.unlink()
-        except Exception:
-            pass
+    """Dev server ports already listening, for before/after comparison."""
+    return await host.scan_open_ports(Config.WORKSPACE)
 
 
 async def _find_dev_server_by_scan(exclude_ports: set[int] | None = None) -> str | None:
-    """Scan for dev server ports, optionally excluding pre-existing ones."""
-    ports = [3000, 3001, 5173, 5174, 4200, 8000, 8001, 5000, 5500, 4000, 1234, 8080, 8081, 8888]
-    if exclude_ports:
-        ports = [p for p in ports if p not in exclude_ports]
-    if not ports:
-        return None
-
-    # Script checks each port for HTML response (filters out databases/APIs)
-    ps_lines = [
-        "foreach ($p in @(" + ",".join(str(p) for p in ports) + ")) {",
-        "  try {",
-        "    $r = Invoke-WebRequest -Uri \"http://127.0.0.1:$p\" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop",
-        "    $ct = $r.Headers['Content-Type']",
-        "    if ($r.StatusCode -lt 400 -and ($r.Content -match '<html|<!doctype|<div|<script|text/html' -or $ct -match 'text/html')) {",
-        "      Write-Output $p; exit",
-        "    }",
-        "  } catch {}",
-        "}",
-    ]
-    script_path = Config.WORKSPACE / "_portscan.ps1"
-    script_path.write_text("\n".join(ps_lines), encoding="utf-8")
-
-    wsl_path = str(script_path)
-    if wsl_path.startswith("/mnt/"):
-        parts = wsl_path[5:].split("/", 1)
-        win_path = f"{parts[0].upper()}:\\{parts[1]}".replace("/", "\\")
-    else:
-        win_path = wsl_path
-
-    try:
-        returncode, stdout, stderr = await process_ops.run_powershell_file(win_path, timeout=30)
-        port = stdout.strip()
-        if port and port.isdigit():
-            return f"http://localhost:{port}"
-    finally:
-        try:
-            script_path.unlink()
-        except Exception:
-            pass
-
-    return None
+    """Find a port serving HTML, optionally ignoring pre-existing ones."""
+    return await host.find_dev_server(Config.WORKSPACE, exclude_ports)
 
 
 async def _execute_task(bot, chat_id, task_text: str, context):
@@ -1715,7 +1645,7 @@ async def _execute_task(bot, chat_id, task_text: str, context):
     # Step 1: Ask LLM to create a plan
     planning_msg = await bot.send_message(chat_id, "Planning task steps...")
 
-    system = _PLAN_SYSTEM_PROMPT.format(ollama_url=Config.OLLAMA_URL)
+    system = _plan_prompt()
     plan = await llm.ask(task_text, system_prompt=system)
 
     if not plan or plan.startswith("Cannot connect") or plan.startswith("Ollama error"):
@@ -1826,7 +1756,7 @@ async def _execute_task(bot, chat_id, task_text: str, context):
             if found_url:
                 detected_url = found_url
                 output_log += f"\nDev server found: {detected_url}"
-                await process_ops.open_in_explorer(detected_url, timeout=10)
+                await process_ops.open_url(detected_url, timeout=10)
                 output_log += f"\nOpened {detected_url} in browser"
                 import asyncio as _aio
                 await _aio.sleep(12)  # let page fully load and render
@@ -1903,6 +1833,69 @@ async def cmd_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /do <describe what you want done>")
         return
     await _execute_task(context.bot, update.effective_chat.id, task, context)
+
+
+# ── Commerce (agentic-commerce sidecar) ───────────────────────────
+
+@authorized
+async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List shopping providers and their connection state. Usage: /providers"""
+    await typing(update)
+    await reply(update.message, await commerce.providers(update.effective_chat.id))
+
+
+@authorized
+async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log in to a shopping provider. Usage: /connect <provider_id>"""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /connect <provider_id>\nSee /providers for the list."
+        )
+        return
+    chat_id = update.effective_chat.id
+    provider = context.args[0].strip()
+    msg = await update.message.reply_text(f"Connecting to {provider} ...")
+    # Selecting as well as connecting: a provider you just logged into is
+    # almost certainly the one you want to shop from, and needing two commands
+    # to get there is a papercut.
+    await commerce.select(chat_id, provider)
+    result = await commerce.connect(chat_id, provider)
+    await msg.edit_text(result)
+
+
+@authorized
+async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search the store. Usage: /search <product>"""
+    query = " ".join(context.args) if context.args else ""
+    if not query:
+        await update.message.reply_text("Usage: /search <product>\nExample: /search milk")
+        return
+    await typing(update)
+    msg = await update.message.reply_text(f"Searching for '{query}' ...")
+    result = await commerce.search(update.effective_chat.id, query)
+    await msg.delete()
+    await reply(update.message, result)
+
+
+@authorized
+async def cmd_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the shopping cart. Usage: /cart"""
+    await typing(update)
+    await reply(update.message, await commerce.cart(update.effective_chat.id))
+
+
+@authorized
+async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shop in natural language. Usage: /shop order 2 litres of milk"""
+    text = " ".join(context.args) if context.args else ""
+    if not text:
+        await update.message.reply_text(
+            "Usage: /shop <what you want>\n"
+            "Example: /shop find the cheapest brown bread and add one to my cart\n\n"
+            "Plain messages work too - this command just makes it discoverable."
+        )
+        return
+    await _run_agent_turn(update, context, text)
 
 
 @authorized
@@ -2012,6 +2005,83 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data.pop("nb_edit_cell", None)
         result = notebook_mgr.edit_cell(cell_idx, text)
         await update.message.reply_text(result)
+        return
+
+    await _run_agent_turn(update, context, text)
+
+
+async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """Hand the turn to the commerce agent. Returns True if it handled it.
+
+    That agent drives the provider's raw MCP tools, so it can do the things the
+    canonical wrapper cannot: offer a list of biscuits to choose from, suggest
+    what goes into a samosa, read your usual items, track an order. Mimir stays
+    responsible for the one thing the loop must not decide alone -- whether to
+    spend money.
+    """
+    chat_id = update.effective_chat.id
+    await typing(update)
+    thinking = await update.message.reply_text("Looking...")
+
+    data = await commerce.assistant(chat_id, text)
+    if not data.get("ok"):
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+        error = data.get("error", "")
+        if "not selected" in error or "not connected" in error:
+            await update.message.reply_text(
+                f"{error}\n\nTry /connect swiggy first."
+            )
+            return True
+        return False  # fall through to Mimir's own agent
+
+    if not data.get("blocked_on_confirmation"):
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+        await reply_smart(update.message, data.get("reply") or "No response.")
+        return True
+
+    # The loop wanted to place the order. Show the real cart and ask.
+    try:
+        await thinking.delete()
+    except Exception:
+        pass
+
+    if blocked := await commerce.live_spending_blocked(chat_id):
+        await update.message.reply_text(blocked)
+        return True
+
+    intent = await commerce.checkout_intent(chat_id)
+    if not intent.get("ok"):
+        await update.message.reply_text(f"Cannot check out: {intent.get('error')}")
+        return True
+
+    dry = "  [DRY RUN - no real order]" if intent.get("dry_run") else ""
+    approved = await guard.request_permission(
+        context.bot, chat_id, "commerce_checkout",
+        f"place order for {intent['total_display']}{dry}",
+        intent.get("summary", ""),
+    )
+    if not approved:
+        await update.message.reply_text("Order cancelled. Nothing was charged.")
+        return True
+
+    result = await commerce.checkout(chat_id, intent["confirm_token"])
+    await reply_smart(update.message, result)
+    return True
+
+
+async def _run_agent_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Drive one turn: the commerce agent first, then Mimir's own tool loop.
+
+    Shared by the plain-message handler and /shop so both take exactly the same
+    path -- including the tool set, the permission gate and the regex fallback.
+    """
+    if await _run_commerce_turn(update, context, text):
         return
 
     await typing(update)
@@ -2264,14 +2334,19 @@ async def post_init(application: Application):
         BotCommand("logs", "View agent logs"),
         BotCommand("apply", "Apply LLM-suggested fix"),
         BotCommand("do", "Execute a complex task"),
-        BotCommand("open", "Open in Explorer"),
+        BotCommand("open", f"Reveal in {host.FILE_MANAGER}"),
         BotCommand("cd", "Change current folder"),
         BotCommand("pwd", "Show current folder"),
         BotCommand("clip", "Copy to clipboard"),
+        BotCommand("shop", "Shop in plain English"),
+        BotCommand("search", "Search the store"),
+        BotCommand("cart", "Show your cart"),
+        BotCommand("providers", "Which stores are set up"),
+        BotCommand("connect", "Log in to a store"),
         BotCommand("bookmark", "Save a bookmark"),
         BotCommand("go", "Go to bookmark"),
         BotCommand("gpu", "GPU status"),
-        BotCommand("stop", "Shutdown RAVEN"),
+        BotCommand("stop", "Shutdown MIMIR"),
         BotCommand("livestream", "Stream desktop to Telegram"),
         BotCommand("remote", "Remote desktop access link"),
         BotCommand("persona", "Switch personality"),
@@ -2298,16 +2373,7 @@ async def post_init(application: Application):
         # GPU check
         gpu_line = "N/A"
         try:
-            rc, out, _ = await process_ops.run_command(
-                'powershell.exe -NoProfile -Command "'
-                'nvidia-smi --query-gpu=name,memory.used,memory.total '
-                '--format=csv,noheader,nounits"',
-                timeout=8,
-            )
-            if rc == 0 and out.strip():
-                parts = [p.strip() for p in out.strip().split("\n")[0].split(",")]
-                if len(parts) >= 3:
-                    gpu_line = f"{parts[0]} ({parts[1]}/{parts[2]} MB)"
+            gpu_line = await host.gpu_summary() or "N/A"
         except Exception:
             pass
 
@@ -2334,7 +2400,7 @@ async def post_init(application: Application):
         try:
             await application.bot.send_message(
                 Config.TELEGRAM_CHAT_ID,
-                "RAVEN online. Send /help for commands.",
+                "MIMIR online. Send /help for commands.",
             )
         except Exception:
             pass
@@ -2344,7 +2410,7 @@ async def post_init(application: Application):
 
 def create_bot() -> Application:
     """Create and configure the Telegram bot."""
-    # RAVEN starts on a cold WSL boot, where the NAT interface often needs a few
+    # MIMIR starts on a cold WSL boot, where the NAT interface often needs a few
     # seconds before it can carry traffic. PTB's 5s default connect timeout is
     # short enough that the very first getMe() call can time out and — combined
     # with bootstrap_retries=0 in main.py — kill the process outright.
@@ -2416,6 +2482,11 @@ def create_bot() -> Application:
     app.add_handler(CommandHandler("open", cmd_open))
     app.add_handler(CommandHandler("cd", cmd_cd))
     app.add_handler(CommandHandler("pwd", cmd_pwd))
+    app.add_handler(CommandHandler("shop", cmd_shop))
+    app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("cart", cmd_cart))
+    app.add_handler(CommandHandler("providers", cmd_providers))
+    app.add_handler(CommandHandler("connect", cmd_connect))
     app.add_handler(CommandHandler("clip", cmd_clip))
     app.add_handler(CommandHandler("bookmark", cmd_bookmark))
     app.add_handler(CommandHandler("go", cmd_go))

@@ -8,43 +8,62 @@ propose them but only the user can authorize them.
 
 import json
 import logging
+import os
 
 from config import Config
-from core import paths, session, tools_registry
+from core import paths, platform as host, session, tools_registry
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 5
+# A shopping turn is legitimately more hops than a file operation: compare ->
+# add to cart -> show the cart -> checkout -> report status is already five,
+# before any correction. At 5 the loop ran out mid-flow and told the user it had
+# failed on a turn where the order had in fact been placed -- the worst possible
+# thing to be wrong about on a money path.
+MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "10"))
 
 # Tool results are resent on every subsequent iteration, so a big directory
 # listing or file read is paid for repeatedly. Groq's free tier allows 12k
 # tokens/minute and an uncapped listing exhausts it in a couple of turns.
 MAX_TOOL_RESULT_CHARS = 2000
 
-_SYSTEM = """You control the user's Windows machine through a WSL2 agent called RAVEN.
+_SYSTEM = """You are Mimir, a shopping assistant the user talks to over Telegram.
 
-Use the provided tools to actually do what the user asks - never tell them to \
-run a command themselves, and never claim you cannot navigate.
+Use the tools to actually do what the user asks - never tell them to do it \
+themselves.
 
-The user thinks in Windows paths (D:\\Projects). You may pass paths in any \
-form: D:\\Projects, D:/Projects, /mnt/d/Projects, or "d drive projects". They \
-all resolve correctly. Relative names resolve against the current folder.
+How shopping works:
+- commerce_search finds products and returns their product_id. ALWAYS search \
+before adding something to the cart; never invent a product_id.
+- commerce_add_to_cart adds to whatever is already in the cart.
+- commerce_cart shows the cart and total. Show it to the user before checkout.
+- commerce_checkout places the order. The user is shown the cart and total and \
+must tap Approve, so do not ask them to confirm in chat first - just call it \
+and the prompt appears.
+- If the store is not connected, say so and suggest /connect. Do not retry \
+in a loop.
 
-The current folder is {cwd_win}.
+If a tool returns an error, tell the user plainly what went wrong. Do not call \
+the same tool over and over hoping for a different answer.
 
-Chain tools when a request needs more than one step. For example, "go to d \
-drive projects and list the folders" is cd followed by list_dir.
+If the user denies the order, do not retry it or look for another route. Tell \
+them it was not placed.
 
-Always prefer the read-only tools. To see what is in a folder use list_dir or \
-tree; to locate a file use find_files. Only use shell_command or run_script \
-when no other tool can do the job - they interrupt the user for approval, so \
-reaching for them to list or search files wastes their time.
+Reply in plain text, briefly - it is read on a phone. Prices in rupees."""
 
-If the user denies permission, do not retry the same action and do not look \
-for a way around it. Tell them what you did not do.
+_MAC_PATHS = """The user thinks in ordinary macOS paths (/Users/you/Projects). \
+You may pass absolute paths, ~ shorthand (~/Projects), or names relative to \
+the current folder. There are no drive letters on this machine."""
 
-When you have the answer, reply in plain text. Keep replies short - they are \
-read on a phone. Show paths in Windows form."""
+_WSL_PATHS = """The user thinks in Windows paths (D:\\Projects). You may pass \
+paths in any form: D:\\Projects, D:/Projects, /mnt/d/Projects, or "d drive \
+projects". They all resolve correctly. Relative names resolve against the \
+current folder. Show paths in Windows form."""
+
+
+def _system_prompt(cwd: str) -> str:
+    """The agent's system prompt, bound to whichever host it is running on."""
+    return _SYSTEM
 
 
 async def run(bot, chat_id: int, text: str, llm, guard, on_file=None) -> str:
@@ -53,7 +72,7 @@ async def run(bot, chat_id: int, text: str, llm, guard, on_file=None) -> str:
     Raises RuntimeError when every LLM provider is unavailable, so the caller
     can fall back to the regex classifier.
     """
-    # Defense in depth: the tool loop can read files, open Explorer and (with
+    # Defense in depth: the tool loop can read files, open the file manager and (with
     # approval) run code, so it must never execute for anyone but the owner --
     # even if a future caller forgets the @authorized decorator that also gates
     # this at the Telegram entry point.
@@ -63,7 +82,7 @@ async def run(bot, chat_id: int, text: str, llm, guard, on_file=None) -> str:
 
     cwd = session.get_cwd(chat_id)
     messages = [
-        {"role": "system", "content": _SYSTEM.format(cwd_win=paths.to_windows(cwd))},
+        {"role": "system", "content": _system_prompt(cwd)},
         {"role": "user", "content": text},
     ]
 
@@ -125,6 +144,13 @@ async def _run_one(bot, chat_id, call, guard, denied, on_file) -> str:
     name = call["name"]
     args = call.get("args") or {}
 
+    # Checkout is gated, but not through the generic path below: that prompt can
+    # only describe the tool's arguments, and commerce_checkout has none. Being
+    # asked to approve "commerce_checkout" tells the user nothing about what
+    # they are about to buy.
+    if name == "commerce_checkout":
+        return await _commerce_checkout(bot, chat_id, guard)
+
     if name in tools_registry.GATED_TOOLS:
         fingerprint = f"{name}:{json.dumps(args, sort_keys=True)}"
         if fingerprint in denied:
@@ -159,11 +185,43 @@ async def _send_file(chat_id, args, on_file) -> str:
         return f"Access denied: {args.get('path')}"
     path, error = file_ops.get_file_for_send(str(target))
     if error:
-        return f"Cannot send {paths.to_windows(str(target))}: {error}"
+        return f"Cannot send {paths.display(str(target))}: {error}"
     if on_file is None:
         return "No delivery channel available."
     await on_file(path)
-    return f"Sent {paths.to_windows(path)} to the user."
+    return f"Sent {paths.display(path)} to the user."
+
+
+async def _commerce_checkout(bot, chat_id, guard) -> str:
+    """Place the order, gated on an approval bound to one exact cart.
+
+    Two steps on purpose. `checkout_intent` snapshots the cart and mints a
+    single-use token without spending anything, so the Telegram prompt can show
+    the real line items and total. The token the user is approving is void if
+    the cart changes before it is redeemed -- so an agent that adds something
+    after the user has seen the total cannot spend against that approval.
+    """
+    from tools import commerce
+
+    if blocked := await commerce.live_spending_blocked(chat_id):
+        return blocked
+
+    intent = await commerce.checkout_intent(chat_id)
+    if not intent.get("ok"):
+        return f"Cannot check out: {intent.get('error', 'unknown error')}"
+
+    dry = "  [DRY RUN - no real order]" if intent.get("dry_run") else ""
+    description = (
+        f"place order on {intent['provider_id']} for {intent['total_display']}{dry}"
+    )
+
+    approved = await guard.request_permission(
+        bot, chat_id, "commerce_checkout", description, intent.get("summary", ""),
+    )
+    if not approved:
+        return "The user denied the order. Do not retry it or try another route."
+
+    return await commerce.checkout(chat_id, intent["confirm_token"])
 
 
 async def _screenshot(on_file) -> str:
@@ -195,7 +253,7 @@ def _describe(name: str, args: dict) -> str:
     if name == "kill_process":
         return f"kill process: {args.get('name', 'most recent')}"
     target = args.get("path", "")
-    win = paths.to_windows(str(target)) if target else ""
+    win = paths.display(str(target)) if target else ""
     return {
         "write_file": f"write to {win}",
         "delete_file": f"delete {win}",

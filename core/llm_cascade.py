@@ -8,12 +8,36 @@ for speed, falls back to local Ollama if they fail.
 import asyncio
 import json
 import logging
+import re
 
 import aiohttp
 
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+
+_GROQ_MAX_RETRY_WAIT_S = 12.0
+
+
+def _retry_after_seconds(resp, body: str) -> float | None:
+    """How long Groq says to wait, or None if it did not say / it is too long."""
+    raw = resp.headers.get("retry-after")
+    wait = None
+    if raw:
+        try:
+            wait = float(raw)
+        except ValueError:
+            wait = None
+    if wait is None:
+        # Groq puts it in prose too: "Please try again in 4.65s".
+        m = re.search(r"try again in ([0-9.]+)s", body)
+        if m:
+            wait = float(m.group(1))
+    if wait is None or wait > _GROQ_MAX_RETRY_WAIT_S:
+        return None
+    return wait + 0.25  # small cushion; the window is measured server-side
+
 
 # Provider names for logging / status
 GROQ = "Groq"
@@ -119,15 +143,20 @@ class SmartLLM:
         }
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=_TIMEOUT) as resp:
-                if resp.status == 429:
+            for attempt in (1, 2):
+                async with session.post(url, json=payload, headers=headers, timeout=_TIMEOUT) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data["choices"][0]["message"]["content"]
                     body = await resp.text()
-                    raise RuntimeError(f"Groq rate-limited (429): {body[:200]}")
-                if resp.status != 200:
-                    body = await resp.text()
+                    if resp.status == 429 and attempt == 1:
+                        wait = _retry_after_seconds(resp, body)
+                        if wait is not None:
+                            logger.info(f"Groq rate-limited; waiting {wait:.1f}s and retrying once")
+                            await asyncio.sleep(wait)
+                            continue
                     raise RuntimeError(f"Groq HTTP {resp.status}: {body[:300]}")
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"]
+            raise RuntimeError("Groq rate-limited twice in a row")
 
     async def _ping_groq(self) -> bool:
         if not Config.GROQ_API_KEY:
@@ -327,10 +356,19 @@ class SmartLLM:
             "tool_choice": "auto",
         }
         async with aiohttp.ClientSession() as sess:
-            async with sess.post(url, json=payload, headers=headers, timeout=_TIMEOUT) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"Groq HTTP {resp.status}: {(await resp.text())[:300]}")
-                return self._parse_groq(await resp.json())
+            for attempt in (1, 2):
+                async with sess.post(url, json=payload, headers=headers, timeout=_TIMEOUT) as resp:
+                    if resp.status == 200:
+                        return self._parse_groq(await resp.json())
+                    body = await resp.text()
+                    if resp.status == 429 and attempt == 1:
+                        wait = _retry_after_seconds(resp, body)
+                        if wait is not None:
+                            logger.info(f"Groq rate-limited; waiting {wait:.1f}s and retrying once")
+                            await asyncio.sleep(wait)
+                            continue
+                    raise RuntimeError(f"Groq HTTP {resp.status}: {body[:300]}")
+            raise RuntimeError("Groq rate-limited twice in a row")
 
     async def _tools_gemini(self, messages: list[dict], tools: list[dict]) -> dict:
         if not Config.GEMINI_API_KEY:

@@ -1,5 +1,5 @@
 [Unit]
-Description=RAVEN AI Agent - Telegram-controlled local LLM agent
+Description=MIMIR AI Agent - Telegram-controlled local LLM agent
 After=network.target network-online.target
 Wants=network-online.target
 

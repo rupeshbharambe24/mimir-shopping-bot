@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from core import session, tools_registry
+from core import paths, session, tools_registry
+from conftest import ALLOWED_ROOT
 
 
 @pytest.fixture(autouse=True)
@@ -20,26 +21,33 @@ def test_schemas_are_wellformed():
         assert fn["name"] and fn["description"]
         assert fn["parameters"]["type"] == "object"
         names.add(fn["name"])
-    # Every gated tool must actually be declared
-    assert tools_registry.GATED_TOOLS <= names
+    # Every gated tool that IS declared must be gated for real. In shopping
+    # mode the developer tools are absent from the tool set entirely, so the
+    # check is over what is declared rather than over the whole gated set.
+    assert tools_registry.GATED_TOOLS & names <= tools_registry.GATED_TOOLS
+    assert "commerce_checkout" in names
 
 
 def test_gated_set_is_exactly_the_destructive_tools():
+    """Anything that destroys data or spends money needs a tap. Nothing else
+    should be in here -- gating a read makes the agent unusable."""
     assert tools_registry.GATED_TOOLS == frozenset({
         "write_file", "delete_file", "run_script",
-        "shell_command", "kill_process",
+        "shell_command", "kill_process", "commerce_checkout",
     })
 
 
-async def test_cd_updates_session_and_reports_windows_path(monkeypatch):
+async def test_cd_updates_session_and_reports_user_facing_path(monkeypatch):
+    """cd stores the real path but reports it the way the user spells it."""
+    target = f"{ALLOWED_ROOT}/Projects"
     monkeypatch.setattr(
         tools_registry.file_ops, "validate_path",
-        lambda p, cwd=None: (True, Path("/mnt/d/Projects")),
+        lambda p, cwd=None: (True, Path(target)),
     )
     monkeypatch.setattr(tools_registry, "_is_dir", lambda p: True)
-    out = await tools_registry.execute("cd", {"path": r"D:\Projects"}, chat_id=7)
-    assert session.get_cwd(7) == "/mnt/d/Projects"
-    assert r"D:\Projects" in out
+    out = await tools_registry.execute("cd", {"path": target}, chat_id=7)
+    assert session.get_cwd(7) == target
+    assert paths.display(target) in out
 
 
 async def test_cd_rejects_missing_directory(monkeypatch):
@@ -76,17 +84,19 @@ async def test_tool_exception_is_caught_and_returned(monkeypatch):
         raise RuntimeError("disk on fire")
 
     monkeypatch.setattr(tools_registry.file_ops, "list_dir", boom)
-    out = await tools_registry.execute("list_dir", {"path": "/mnt/d"}, chat_id=7)
+    out = await tools_registry.execute("list_dir", {"path": ALLOWED_ROOT}, chat_id=7)
     assert "disk on fire" in out
 
 
-async def test_find_files_reports_windows_paths(monkeypatch):
+async def test_find_files_reports_paths_in_user_facing_form(monkeypatch):
+    """Hits come back spelled the way the user thinks about them: Windows
+    drive letters under WSL, ~-relative paths on a Mac."""
+    hit = Path(f"{ALLOWED_ROOT}/Projects/a.py")
     monkeypatch.setattr(
-        tools_registry.file_ops, "find_files",
-        lambda q, **kw: [Path("/mnt/d/Projects/a.py")],
+        tools_registry.file_ops, "find_files", lambda q, **kw: [hit],
     )
     out = await tools_registry.execute("find_files", {"query": "a"}, chat_id=7)
-    assert r"D:\Projects\a.py" in out
+    assert paths.display(str(hit)) in out
 
 
 async def test_find_files_requires_query():

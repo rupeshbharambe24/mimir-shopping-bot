@@ -3,6 +3,7 @@ import logging
 
 from config import Config
 from core.llm_cascade import SmartLLM
+from core import platform as host
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ async def get_status() -> str:
     lines = [
         "SYSTEM STATUS",
         "",
-        f"Agent: Running",
+        f"Agent: Running on {host.NAME}",
         f"LLM cascade: {llm.get_status() or 'idle'}",
         f"  Groq:   {_badge(health['Groq'])}  ({Config.GROQ_MODEL})",
         f"  Gemini: {_badge(health['Gemini'])}  ({Config.GEMINI_MODEL})",

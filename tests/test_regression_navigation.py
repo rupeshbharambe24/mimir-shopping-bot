@@ -7,8 +7,9 @@ executed, and that path arguments survive normalization intact.
 import pytest
 
 from core import agent, paths, session
+from conftest import ALLOWED_ROOT, wsl_only
 
-CWD = "/mnt/c/Users/rupes/ai-agent"
+CWD = f"{ALLOWED_ROOT}/ai-agent"
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +34,7 @@ class AlwaysApprove:
         return True
 
 
+@wsl_only
 @pytest.mark.parametrize("raw,expected", [
     # "list all folders in D:/Projects" used to yield "/Projects"
     ("D:/Projects", "/mnt/d/Projects"),
@@ -112,8 +114,9 @@ async def test_bare_ls_follows_cd_not_workspace(monkeypatch):
     monkeypatch.setattr(tools_registry.file_ops, "list_dir", fake_list_dir)
     monkeypatch.setattr(tools_registry, "_is_dir", lambda p: True)
 
-    await tools_registry.execute("cd", {"path": r"D:\Projects"}, chat_id=7)
+    target = f"{ALLOWED_ROOT}/Projects"
+    await tools_registry.execute("cd", {"path": target}, chat_id=7)
     await tools_registry.execute("list_dir", {}, chat_id=7)
 
-    assert seen["path"] == "/mnt/d/Projects"
+    assert seen["path"] == target
     assert "ai-agent" not in seen["path"]

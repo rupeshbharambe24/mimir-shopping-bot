@@ -72,7 +72,8 @@ class NotebookManager:
         """Start a Jupyter kernel.
 
         If *python_path* is given it is used as the Python executable, e.g.
-        ``/mnt/d/commonenv/Scripts/python.exe`` (Windows via WSL) or
+        ``~/.venvs/ml/bin/python`` (macOS/Linux),
+    ``/mnt/d/commonenv/Scripts/python.exe`` (Windows via WSL), or
         ``/home/user/venv/bin/python3`` (native Linux).
         """
         try:

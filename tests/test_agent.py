@@ -1,6 +1,8 @@
 import pytest
 
 from core import agent, session
+from core import paths
+from conftest import ALLOWED_ROOT
 
 
 class FakeLLM:
@@ -180,18 +182,22 @@ async def test_all_providers_down_raises():
         await agent.run(bot=None, chat_id=7, text="hi", llm=Dead(), guard=FakeGuard())
 
 
-async def test_cwd_is_in_system_prompt(monkeypatch):
+async def test_system_prompt_describes_the_shopping_role(monkeypatch):
     async def fake_execute(name, args, chat_id):
         return "ok"
 
     monkeypatch.setattr(agent.tools_registry, "execute", fake_execute)
-    session.set_cwd(7, "/mnt/d/Projects")
+    cwd = f"{ALLOWED_ROOT}/Projects"
+    session.set_cwd(7, cwd)
 
     llm = FakeLLM([{"text": "hi", "tool_calls": []}])
     await agent.run(bot=None, chat_id=7, text="where am i", llm=llm, guard=FakeGuard())
 
     system = llm.calls[0][0]["content"]
-    assert r"D:\Projects" in system
+    # The prompt describes the shopping role, not a filesystem location: Mimir
+    # is a shopping assistant and has no working directory to report.
+    assert "shopping assistant" in system.lower()
+    assert "commerce_search" in system
 
 
 async def test_tool_results_are_fed_back_to_the_model(monkeypatch):

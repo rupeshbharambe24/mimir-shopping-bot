@@ -1,55 +1,40 @@
-import asyncio
 import logging
 from pathlib import Path
 
 from config import Config
+from core import paths, platform as host
 
 logger = logging.getLogger(__name__)
 
 
-from core.paths import to_windows as _wsl_to_win
-
-
 async def take_screenshot() -> tuple[str | None, str | None]:
-    """Capture Windows screen from WSL via PowerShell. Returns (wsl_path, error)."""
-    wsl_path = str(Config.WORKSPACE / "screenshot.png")
-    win_path = _wsl_to_win(wsl_path)
+    """Capture the user's desktop. Returns (local_path, error).
 
-    ps_script = f"""
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$screens = [System.Windows.Forms.Screen]::AllScreens
-$top = ($screens | ForEach-Object {{ $_.Bounds.Top }} | Measure-Object -Minimum).Minimum
-$left = ($screens | ForEach-Object {{ $_.Bounds.Left }} | Measure-Object -Minimum).Minimum
-$width = ($screens | ForEach-Object {{ $_.Bounds.Right }} | Measure-Object -Maximum).Maximum
-$height = ($screens | ForEach-Object {{ $_.Bounds.Bottom }} | Measure-Object -Maximum).Maximum
-$bounds = [System.Drawing.Rectangle]::FromLTRB($left, $top, $width, $height)
-$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$bmp.Save('{win_path}')
-$g.Dispose()
-$bmp.Dispose()
-"""
+    The returned path is always a local path the agent can open and upload;
+    only the path handed to the capturing program is host-native.
+    """
+    local_path = str(Config.WORKSPACE / "screenshot.png")
 
+    # Stale file from a previous run would otherwise be re-sent as if it were
+    # fresh when the capture silently produces nothing.
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "powershell.exe", "-NoProfile", "-Command", ps_script,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
-
-        if proc.returncode != 0:
-            error = stderr.decode("utf-8", errors="replace")
-            return None, f"Screenshot failed: {error[:300]}"
-
-        if Path(wsl_path).exists():
-            return wsl_path, None
-        return None, "Screenshot file not created"
-    except asyncio.TimeoutError:
-        return None, "Screenshot timed out"
+        Path(local_path).unlink()
     except FileNotFoundError:
-        return None, "powershell.exe not found - are you in WSL?"
-    except Exception as e:
-        return None, str(e)
+        pass
+    except OSError as exc:
+        logger.warning(f"Could not clear previous screenshot: {exc}")
+
+    returncode, _, stderr = await host.capture_screen(
+        paths.to_native(local_path), timeout=20
+    )
+
+    if returncode != 0:
+        detail = stderr.strip()[:300] or "no error output"
+        return None, f"Screenshot failed: {detail}\n\n{host.screenshot_permission_hint()}"
+
+    if not Path(local_path).exists():
+        # screencapture exits 0 without writing a file when the process has no
+        # Screen Recording grant, so a clean exit is not proof of success.
+        return None, f"Screenshot file not created.\n\n{host.screenshot_permission_hint()}"
+
+    return local_path, None

@@ -14,6 +14,7 @@ logs/
 .sessions.json
 screenshot.png
 _portscan.ps1
+_portscan_snap.ps1
 .persona
 
 # OS
@@ -28,4 +29,6 @@ Thumbs.db
 
 # Generated
 ai-agent.service
+com.mimir.agent.plist
+com.mimir.commerce.plist
 bash.exe.stackdump

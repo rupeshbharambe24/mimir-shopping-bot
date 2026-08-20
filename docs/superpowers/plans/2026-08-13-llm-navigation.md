@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace RAVEN's brittle regex intent classifier with an LLM tool-calling loop, and make every path-taking command understand Windows paths and a persistent current directory.
+**Goal:** Replace MIMIR's brittle regex intent classifier with an LLM tool-calling loop, and make every path-taking command understand Windows paths and a persistent current directory.
 
 **Architecture:** A new `core/paths.py` is the single authority on interpreting paths (`D:\Projects`, `d drive projects`, `/mnt/d/Projects` all normalize to one WSL path). `core/session.py` holds a per-chat current directory persisted to JSON. `core/tools_registry.py` declares the tool schemas and executes them, routing destructive tools through the existing `Guard`. `core/agent.py` runs the model→tool→model loop. `core/llm_cascade.py` gains `ask_with_tools()` which normalizes Groq, Gemini, and Ollama tool-call formats into one shape.
 
@@ -84,7 +84,7 @@ CWD = "/mnt/c/Users/rupes/ai-agent"
     # Windows absolute, both slash directions
     (r"D:\Projects", "/mnt/d/Projects"),
     ("D:/Projects", "/mnt/d/Projects"),
-    (r"d:\projects\raven", "/mnt/d/projects/raven"),
+    (r"d:\projects\mimir", "/mnt/d/projects/mimir"),
     # Bare drive
     ("D:", "/mnt/d"),
     (r"D:\", "/mnt/d"),
@@ -92,7 +92,7 @@ CWD = "/mnt/c/Users/rupes/ai-agent"
     ("d drive", "/mnt/d"),
     ("D drive", "/mnt/d"),
     ("d drive projects", "/mnt/d/projects"),
-    ("d drive Projects/raven", "/mnt/d/Projects/raven"),
+    ("d drive Projects/mimir", "/mnt/d/Projects/mimir"),
     # Already WSL
     ("/mnt/d/Projects", "/mnt/d/Projects"),
     ("/home/rupesh-wsl", "/home/rupesh-wsl"),
@@ -144,7 +144,7 @@ Create `core/paths.py`:
 ```python
 """Single authority on interpreting and rendering filesystem paths.
 
-RAVEN runs in WSL but the user works on Windows, so every path the user types
+MIMIR runs in WSL but the user works on Windows, so every path the user types
 may arrive in any of these spellings — all meaning the same directory:
 
     D:\\Projects   D:/Projects   /mnt/d/Projects   "d drive projects"
@@ -158,7 +158,7 @@ Imports stdlib only (plus config) — importing from tools/ would create a cycle
 import os
 import re
 
-# "d drive", "D drive projects", "d drive Projects/raven"
+# "d drive", "D drive projects", "d drive Projects/mimir"
 _DRIVE_WORD = re.compile(r"^([a-zA-Z])\s+drive\b\s*(.*)$", re.IGNORECASE)
 # "D:\..." or "D:/..."
 _WIN_ABS = re.compile(r"^([a-zA-Z]):[\\/](.*)$")
@@ -297,9 +297,9 @@ def test_spoken_drive_resolves():
 
 
 def test_relative_path_resolves_against_supplied_cwd():
-    ok, target = file_ops.validate_path("core", cwd="/mnt/d/Projects/raven")
+    ok, target = file_ops.validate_path("core", cwd="/mnt/d/Projects/mimir")
     assert ok is True
-    assert target == Path("/mnt/d/Projects/raven/core")
+    assert target == Path("/mnt/d/Projects/mimir/core")
 
 
 def test_empty_path_rejected():
@@ -1510,7 +1510,7 @@ logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 5
 
-_SYSTEM = """You control the user's Windows machine through a WSL2 agent called RAVEN.
+_SYSTEM = """You control the user's Windows machine through a WSL2 agent called MIMIR.
 
 Use the provided tools to actually do what the user asks — never tell them to \
 run a command themselves, and never claim you cannot navigate.
@@ -2043,7 +2043,7 @@ git commit -m "test: add regression coverage for the reported navigation failure
 - [ ] **Step 1: Sync to the deployed copy**
 
 ```bash
-cd /d/Projects/raven-telegram-agent
+cd /d/Projects/mimir-telegram-agent
 for f in core/paths.py core/session.py core/tools_registry.py core/agent.py \
          core/llm_cascade.py core/bot.py tools/file_ops.py tools/screenshot.py \
          requirements.txt pytest.ini .gitignore; do
@@ -2052,7 +2052,7 @@ done
 cp -r tests /c/Users/rupes/ai-agent/
 diff -rq --exclude=.git --exclude=__pycache__ --exclude=logs \
      --exclude=screenshot.png --exclude=.persona --exclude=.sessions.json \
-     /c/Users/rupes/ai-agent /d/Projects/raven-telegram-agent
+     /c/Users/rupes/ai-agent /d/Projects/mimir-telegram-agent
 ```
 
 - [ ] **Step 2: Restart and confirm startup**

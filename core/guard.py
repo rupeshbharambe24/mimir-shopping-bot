@@ -19,6 +19,9 @@ class Guard:
     WRITE_OPS = frozenset({
         "write_file", "delete_file", "run_script",
         "apply_fix", "install_pkg", "save_file",
+        # Spends real money. Listed here so needs_permission() returns True --
+        # a tool absent from this set is auto-approved without any prompt.
+        "commerce_checkout",
     })
 
     def __init__(self):

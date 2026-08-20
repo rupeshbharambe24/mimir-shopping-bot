@@ -1,14 +1,17 @@
 from pathlib import Path
 
 from tools import file_ops
+from conftest import ALLOWED_ROOT, mac_only, wsl_only
 
 
+@wsl_only
 def test_windows_path_resolves_to_wsl_mount():
     ok, target = file_ops.validate_path(r"D:\Projects")
     assert ok is True
     assert target == Path("/mnt/d/Projects")
 
 
+@wsl_only
 def test_windows_path_is_not_treated_as_workspace_relative():
     """The old bug: D:\\Projects silently became WORKSPACE/D:\\Projects."""
     _, target = file_ops.validate_path(r"D:\Projects")
@@ -16,16 +19,27 @@ def test_windows_path_is_not_treated_as_workspace_relative():
     assert str(target).startswith("/mnt/d")
 
 
+@wsl_only
 def test_spoken_drive_resolves():
     ok, target = file_ops.validate_path("d drive projects")
     assert ok is True
     assert target == Path("/mnt/d/projects")
 
 
-def test_relative_path_resolves_against_supplied_cwd():
-    ok, target = file_ops.validate_path("core", cwd="/mnt/d/Projects/raven")
+@mac_only
+def test_tilde_path_is_allowed():
+    """~ is how a Mac user names their own files; it must not be rejected."""
+    ok, target = file_ops.validate_path("~")
     assert ok is True
-    assert target == Path("/mnt/d/Projects/raven/core")
+    assert target == Path.home()
+
+
+def test_relative_path_resolves_against_supplied_cwd():
+    """Must follow the given cwd, not silently fall back to the workspace."""
+    base = f"{ALLOWED_ROOT}/Projects/mimir"
+    ok, target = file_ops.validate_path("core", cwd=base)
+    assert ok is True
+    assert target == Path(f"{base}/core")
 
 
 def test_empty_path_rejected():

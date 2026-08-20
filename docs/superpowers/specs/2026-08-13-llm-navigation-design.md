@@ -1,11 +1,11 @@
-# LLM-Driven Navigation for RAVEN
+# LLM-Driven Navigation for MIMIR
 
 **Date:** 2026-08-13
 **Status:** Approved
 
 ## Problem
 
-RAVEN classifies free-text messages with a regex table in `core/brain.py`. It
+MIMIR classifies free-text messages with a regex table in `core/brain.py`. It
 misfires on ordinary phrasing, and there is no concept of "where I am", so
 navigation is effectively unusable from a phone.
 

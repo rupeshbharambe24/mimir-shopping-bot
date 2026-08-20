@@ -1,11 +1,30 @@
 import asyncio
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from config import Config
+from core import platform as host
 
 logger = logging.getLogger(__name__)
+
+
+def _shell() -> str:
+    """Path to the bash used for shell_command.
+
+    macOS still ships bash 3.2 at /bin/bash for licensing reasons, so anything
+    the model emits using bash 4+ syntax (associative arrays, mapfile, ${x^^})
+    fails there with a confusing parse error. Homebrew's bash 5 is used when
+    installed; /bin/bash remains the fallback and is what WSL has anyway.
+    """
+    for candidate in ("/opt/homebrew/bin/bash", "/usr/local/bin/bash"):
+        if host.IS_MAC and os.path.exists(candidate):
+            return candidate
+    return shutil.which("bash") or "/bin/bash"
+
+
+SHELL = _shell()
 
 
 async def run_script(filepath: str, timeout: int = 120) -> tuple[int, str, str]:
@@ -48,7 +67,7 @@ async def run_command(command: str, timeout: int = 30, cwd: str | None = None) -
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=work_dir,
-            executable="/bin/bash",
+            executable=SHELL,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return (
@@ -66,98 +85,25 @@ async def run_command(command: str, timeout: int = 30, cwd: str | None = None) -
         return -1, "", str(e)
 
 
-async def _run_exec(argv: list[str], timeout: int, env: dict | None = None) -> tuple[int, str, str]:
-    """Run a program by argv (no shell). Returns (returncode, stdout, stderr)."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return (
-            proc.returncode,
-            stdout.decode("utf-8", errors="replace"),
-            stderr.decode("utf-8", errors="replace"),
-        )
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return -1, "", f"Command timed out after {timeout}s"
-    except Exception as e:
-        return -1, "", str(e)
+# ── Desktop integration ───────────────────────────────────────────
+# The host-specific work lives in core.platform; these stay so the rest of the
+# codebase keeps one stable name per operation regardless of which machine it
+# is running on.
 
 
-def _wslenv_with(*names: str) -> dict:
-    """A copy of os.environ with `names` registered in WSLENV so they cross
-    into Win32 processes. Without this, env vars set in WSL are invisible to
-    powershell.exe."""
-    env = dict(os.environ)
-    existing = env.get("WSLENV", "")
-    additions = ":".join(names)
-    env["WSLENV"] = f"{existing}:{additions}" if existing else additions
-    return env
+async def open_in_explorer(native_path: str, timeout: int = 15) -> tuple[int, str, str]:
+    """Reveal a path in the desktop file manager (Finder / Windows Explorer)."""
+    return await host.open_path(native_path, timeout=timeout)
 
 
-async def open_in_explorer(win_path: str, timeout: int = 15) -> tuple[int, str, str]:
-    """Open a path in Windows Explorer WITHOUT a shell.
-
-    The path travels as an environment variable and is referenced in PowerShell
-    as ``$env:RAVEN_OPEN_PATH``. PowerShell reads an env var as a literal
-    string, never as code, so a path containing shell/PowerShell metacharacters
-    (legal in WSL filenames) cannot inject commands. This replaces the previous
-    ``Start-Process '<path>'`` string interpolation, which was RCE-injectable.
-    """
-    env = _wslenv_with("RAVEN_OPEN_PATH")
-    env["RAVEN_OPEN_PATH"] = win_path
-    return await _run_exec(
-        ["powershell.exe", "-NoProfile", "-Command",
-         "Start-Process -FilePath $env:RAVEN_OPEN_PATH"],
-        timeout=timeout,
-        env=env,
-    )
+async def open_url(url: str, timeout: int = 15) -> tuple[int, str, str]:
+    """Open a URL in the user's default browser."""
+    return await host.open_url(url, timeout=timeout)
 
 
 async def copy_to_clipboard(text: str, timeout: int = 10) -> tuple[int, str, str]:
-    """Copy text to the Windows clipboard WITHOUT a shell.
-
-    Text is piped to clip.exe over stdin, so it is never parsed by a shell.
-    """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "clip.exe",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(
-            proc.communicate(text.encode("utf-8")), timeout=timeout
-        )
-        return proc.returncode, "", stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return -1, "", f"Clipboard timed out after {timeout}s"
-    except Exception as e:
-        return -1, "", str(e)
-
-
-async def run_powershell_file(win_path: str, timeout: int = 30) -> tuple[int, str, str]:
-    """Run a .ps1 script by path WITHOUT a shell.
-
-    The path is a single argv element and PowerShell's -File reads it literally
-    (it does not evaluate expressions), so a path containing quotes or other
-    metacharacters cannot break out into command injection.
-    """
-    return await _run_exec(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", win_path],
-        timeout=timeout,
-    )
+    """Copy text to the desktop clipboard. Text is piped over stdin, never a shell."""
+    return await host.copy_to_clipboard(text, timeout=timeout)
 
 
 async def run_background_command(command: str, cwd: str | None = None,
@@ -172,7 +118,7 @@ async def run_background_command(command: str, cwd: str | None = None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=work_dir,
-        executable="/bin/bash",
+        executable=SHELL,
     )
 
     captured = ""

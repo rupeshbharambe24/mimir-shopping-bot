@@ -1,10 +1,11 @@
-# RAVEN - Telegram AI Agent
+# MIMIR - Telegram AI Agent
 
-> Control your development machine from anywhere. Send a raven.
+> Control your development machine from anywhere. Send a mimir.
 
-A personal AI agent that runs on WSL2, connects to cloud + local LLMs, and gives you full remote control of your dev environment through Telegram — complete with a permission system so it can't do anything destructive without your explicit approval.
+A personal AI agent that runs on **macOS or WSL2**, connects to cloud + local LLMs, and gives you full remote control of your dev environment through Telegram — complete with a permission system so it can't do anything destructive without your explicit approval.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
+![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20WSL2-lightgrey)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot%20API-blue)
 ![LLMs](https://img.shields.io/badge/LLMs-Groq%20%7C%20Gemini%20%7C%20Ollama-purple)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -24,12 +25,12 @@ A personal AI agent that runs on WSL2, connects to cloud + local LLMs, and gives
 ### Demo Flow
 
 ```
-You:   "go to D drive, open my react project, run npm dev and screenshot it"
+You:   "open my react project, run npm dev and screenshot it"
 
-RAVEN: [Plans the steps, asks for approval]
+MIMIR: [Plans the steps, asks for approval]
 You:   [Tap Approve]
 
-RAVEN: [Starts dev server via PowerShell]
+MIMIR: [Starts the dev server]
        [Auto-detects port 5173]
        [Opens browser, waits for load]
        [Sends screenshot to your phone]
@@ -47,7 +48,7 @@ RAVEN: [Starts dev server via PowerShell]
   Gemini:  ON
   Ollama:  ON
   Disk:    45GB free
-  GPU:     NVIDIA RTX 3060 (1024/12288 MB)
+  GPU:     Apple M5 (8 cores), 16GB unified memory
 
   All systems online.
   Send /help for commands.
@@ -56,12 +57,27 @@ RAVEN: [Starts dev server via PowerShell]
 
 ## Architecture
 
+**macOS** — everything is one machine:
+
 ```
 Your Phone (Telegram)
         |
    Telegram Bot API
         |
-     RAVEN Agent (WSL2)
+     MIMIR Agent  ──── Ollama (Metal, unified memory)
+        |
+   macOS itself
+   (files, GPU, Finder, browser, dev servers)
+```
+
+**WSL2** — the agent is in a VM, the desktop is not:
+
+```
+Your Phone (Telegram)
+        |
+   Telegram Bot API
+        |
+     MIMIR Agent (WSL2)
     /       |        \
 Groq     Gemini    Ollama
 (70B)    (Flash)   (7B fallback)
@@ -69,6 +85,11 @@ Groq     Gemini    Ollama
      Windows Machine
      (files, GPU, browser, dev servers)
 ```
+
+Everything host-specific — screen capture, clipboard, file manager, port
+scanning, GPU, and the wording of the LLM prompts — lives in
+[`core/platform.py`](core/platform.py). The rest of the codebase never
+branches on the operating system.
 
 **LLM Cascade**: Tries Groq first (fast, 70B model), falls back to Gemini Flash, then local Ollama. Automatic failover on rate limits or errors.
 
@@ -139,8 +160,8 @@ Groq     Gemini    Ollama
 ### Utility
 | Command | Description |
 |---------|-------------|
-| `/open <path>` | Open in Windows Explorer |
-| `/clip <text>` | Copy to Windows clipboard |
+| `/open <path>` | Reveal in Finder / Windows Explorer |
+| `/clip <text>` | Copy to the system clipboard |
 | `/bookmark <name> <path>` | Save a path shortcut |
 | `/go <name>` | Navigate to bookmark |
 | `/persona` | Switch AI personality |
@@ -151,11 +172,11 @@ Groq     Gemini    Ollama
 
 ### Personality System
 
-RAVEN comes with switchable AI personalities:
+MIMIR comes with switchable AI personalities:
 
 ```
 /persona              — show current + all presets
-/persona raven        — sharp, direct, darkly witty (default)
+/persona mimir        — sharp, direct, darkly witty (default)
 /persona formal       — professional, no personality
 /persona mentor       — patient, teaches as it goes
 /persona brutal       — extremely blunt, no sugar coating
@@ -191,13 +212,33 @@ You don't always need commands. Just type naturally:
 - *"take a screenshot"*
 - *"what's running in the background?"*
 
+### Shopping / Transactions
+
+Backed by the [agentic-commerce](#shopping-agentic-commerce) sidecar.
+
+| Command | Description | Approval |
+|---------|-------------|----------|
+| `/shop <request>` | Order things in plain English | Checkout only |
+| `/compare <item>` | Compare prices across providers | Auto |
+| `/cart` | Show the cart and total | Auto |
+| `/providers` | List providers + connection state | Auto |
+| `/connect <id>` | Log in to a provider | Auto |
+
 ## Setup
 
 ### Prerequisites
 
+**macOS**
+- macOS 12+ (Apple Silicon or Intel)
+- Python 3.10+ (`brew install python`)
+- [Ollama](https://ollama.com) — optional, the cloud cascade works without it
+
+**Windows**
 - Windows 10/11 with WSL2 (Ubuntu)
 - Python 3.10+ in WSL
 - [Ollama](https://ollama.com) installed on Windows
+
+**Both**
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
 - Your Telegram chat ID (from [@userinfobot](https://t.me/userinfobot))
 
@@ -205,24 +246,34 @@ You don't always need commands. Just type naturally:
 
 ```bash
 # Clone
-git clone https://github.com/rupeshbharambe24/raven-telegram-agent.git
-cd raven-telegram-agent
+git clone https://github.com/rupeshbharambe24/mimir-telegram-agent.git
+cd mimir-telegram-agent
 
 # Configure
 cp .env.example .env
 # Edit .env with your tokens and API keys
 
-# Make Ollama accessible from WSL (run in Windows PowerShell):
-[System.Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0", "User")
-# Then restart Ollama
+# WSL2 only — make Ollama on the Windows host reachable from the VM.
+# Run in Windows PowerShell, then restart Ollama:
+#   [System.Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0", "User")
+# On macOS this step does not exist: Ollama is on localhost already.
 
-# Setup (creates venv on Linux fs, installs deps, tests connections)
+# Setup (creates the venv, installs deps, tests connections,
+# generates a launchd plist on macOS or a systemd unit on WSL)
 bash setup.sh
 
 # Run
 source ~/.venvs/ai-agent/bin/activate
 python3 main.py
 ```
+
+### macOS: grant Screen Recording
+
+`/screenshot` needs it, and this is the one thing that fails *silently* without
+it — `screencapture` exits 0 and writes nothing, or captures only the wallpaper.
+
+**System Settings → Privacy & Security → Screen Recording** → add the app that
+launches MIMIR (Terminal, iTerm, or the launchd agent), then restart it.
 
 ### Get Free API Keys
 
@@ -233,6 +284,42 @@ python3 main.py
 | **Ollama** | qwen, deepseek, etc. | Unlimited (local) | [ollama.com](https://ollama.com) |
 
 ### Run as Service
+
+<details open>
+<summary><b>macOS — launchd</b></summary>
+
+`setup.sh` generates `com.mimir.agent.plist` with your paths filled in.
+
+```bash
+cp com.mimir.agent.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mimir.agent.plist
+launchctl kickstart -k gui/$(id -u)/com.mimir.agent
+launchctl print gui/$(id -u)/com.mimir.agent | head -20   # status
+```
+
+It is a **LaunchAgent**, not a LaunchDaemon, and that distinction matters: a
+Daemon starts at boot but runs outside any login session with no access to the
+window server, so `/screenshot` and `/open` would fail every time. An Agent
+starts at login and has a GUI session.
+
+The plist sets `PATH` explicitly. launchd hands a job a bare
+`/usr/bin:/bin:/usr/sbin:/sbin`, so without it Homebrew, `node`, `npm` and
+`ollama` are all invisible to `shell_command` — the most common reason a job
+that works in Terminal fails under launchd.
+
+To stop or remove:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.mimir.agent   # restart
+launchctl bootout gui/$(id -u)/com.mimir.agent        # stop + unload
+```
+
+Logs: `tail -f logs/agent.log` (and `logs/launchd.err.log` if it won't start).
+
+</details>
+
+<details>
+<summary><b>WSL2 — systemd</b></summary>
 
 One-time install. `chmod 644` matters: the file is copied off a Windows drive,
 where everything is mode 777, and systemd refuses world-writable unit files.
@@ -246,23 +333,102 @@ sudo systemctl start ai-agent
 systemctl status ai-agent --no-pager
 ```
 
-Once enabled, systemd starts RAVEN as soon as the distro boots, so neither
-`Start RAVEN.bat` nor the login VBS needs `sudo`. Both call `start-raven.sh`,
+Once enabled, systemd starts MIMIR as soon as the distro boots, so neither
+`Start MIMIR.bat` nor the login VBS needs `sudo`. Both call `start-mimir.sh`,
 which waits for the service and falls back to a foreground run if it isn't
 installed.
 
 > **Never put `sudo` in the startup VBS.** It runs hidden, so sudo has no
-> terminal to prompt on and blocks forever — RAVEN then silently never starts.
+> terminal to prompt on and blocks forever — MIMIR then silently never starts.
 
-Logs:
+Logs: `journalctl -u ai-agent -f`
+
+</details>
+
+## Shopping (agentic-commerce)
+
+MIMIR can search, compare, cart and transact across commerce providers (Swiggy
+Instamart, plus a mock provider for offline testing) through the
+**agentic-commerce** platform, which speaks each provider's MCP server behind one
+canonical interface.
+
+### Architecture
+
+```
+Telegram
+   |
+MIMIR agent loop  (Groq -> Gemini -> Ollama)
+   |  commerce_* tools
+   |  HTTP, loopback only
+agentic-commerce BFF  :8011      <- separate process, separate venv
+   |  ProviderAdapter
+Swiggy Instamart MCP  /  Mock provider
+```
+
+The sidecar is a **separate process on purpose**. Its `requirements.txt` pins
+`mcp` exactly because an unpinned bump silently broke its transport once;
+keeping those pins out of MIMIR's environment means a provider-SDK problem
+cannot take the bot down with it.
+
+### Running it
 
 ```bash
-journalctl -u ai-agent -f
+# One-off:
+bash start-commerce.sh              # creates its venv on first run
+
+# Or as a LaunchAgent beside MIMIR:
+cp com.mimir.commerce.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mimir.commerce.plist
 ```
+
+Set `COMMERCE_DIR` if agentic-commerce is not at
+`~/Projects/Experiments/agentic-commerce`.
+
+### The money path
+
+Checkout is the one commerce operation that requires your tap. Cart edits do
+not — gating every "add milk" would make ordering unusable, so the friction sits
+exactly at the point money moves.
+
+Approving a bare "checkout" would tell you nothing about what you are buying, so
+the prompt is built from a real cart snapshot:
+
+```
+PERMISSION REQUIRED
+
+Action: place order on swiggy for ₹136.00
+Details:
+2 x Toned Milk @ ₹33.00
+1 x Whole Wheat Bread @ ₹45.00
+Total: ₹136.00
+
+[ Approve ]  [ Deny ]
+```
+
+Five independent layers stand between the model and your money:
+
+| # | Layer | What it stops |
+|---|-------|---------------|
+| 1 | `COMMERCE_ALLOW_LIVE` + the BFF's `DRY_RUN` | Both must agree before anything is real |
+| 2 | `GATED_TOOLS` + `Guard` | No order without a tap on your phone |
+| 3 | Cart-bound confirmation token | Single-use, expires in 300s, **void if the cart changes after you approve** |
+| 4 | `CapabilityFlags.max_order_value` | Provider-declared ceiling (Swiggy: ₹1000) |
+| 5 | `GuardedSwiggySession` | In-transport block; the last line even if a caller is confused |
+
+Layer 3 is the subtle one. A plain "checkout is armed" boolean authorizes
+*whatever the cart contains when the call lands* — so an agent that adds an item
+between you reading the total and tapping Approve would spend against an
+approval you never gave. Binding the token to a fingerprint of the exact cart you
+were shown closes that window: if the basket moves, the token is dead and you are
+asked again with the new total.
+
+> **Start with `DRY_RUN=true`** in agentic-commerce's `.env` and leave
+> `COMMERCE_ALLOW_LIVE=false` in MIMIR's until you have watched the whole flow
+> against the mock provider.
 
 ## Permission System
 
-RAVEN uses a **read-auto, write-approve** model:
+MIMIR uses a **read-auto, write-approve** model:
 
 - **Read operations** (read, ls, find, screenshot, status) execute immediately
 - **Write operations** (write, delete, run, commit) send an inline keyboard:
@@ -278,14 +444,21 @@ Tap to approve or deny. 5-minute timeout auto-denies.
 ## Project Structure
 
 ```
-raven-telegram-agent/
+mimir-telegram-agent/
 ├── main.py                 # Entry point
 ├── config.py               # Configuration from .env
 ├── .env.example            # Template for secrets
 ├── requirements.txt        # Python dependencies
-├── setup.sh                # One-command setup
+├── setup.sh                # One-command setup (macOS + WSL2)
+├── start-mimir.sh          # Launcher (launchd / systemd aware)
+├── com.mimir.agent.plist.template   # macOS LaunchAgent
+├── ai-agent.service.template        # WSL2 systemd unit
 ├── core/
+│   ├── platform.py         # Host adapter — the ONLY OS-aware module
+│   ├── paths.py            # Path interpretation + display
 │   ├── bot.py              # Telegram handlers (36 commands)
+│   ├── agent.py            # LLM tool-calling loop
+│   ├── tools_registry.py   # Tool schemas + dispatch
 │   ├── llm_cascade.py      # Groq -> Gemini -> Ollama
 │   ├── guard.py            # Permission system
 │   ├── brain.py            # Natural language intent classifier
@@ -295,9 +468,20 @@ raven-telegram-agent/
     ├── file_ops.py         # File operations + search
     ├── process_ops.py      # Process management + streaming
     ├── git_ops.py          # Git operations (local only)
-    ├── screenshot.py       # Windows screen capture
+    ├── screenshot.py       # Screen capture
     └── system_info.py      # System status
 ```
+
+### Porting to another host
+
+Everything OS-specific is behind `core/platform.py`: screen capture, opening
+paths and URLs, the clipboard, port scanning, GPU reporting, and the prompt
+text that tells the model what kind of machine it is on. Adding a host means
+adding a branch there — no other module checks the platform.
+
+The test suite reflects this. `tests/conftest.py` exposes `wsl_only` and
+`mac_only` markers plus an `ALLOWED_ROOT` fixture, so host-specific assertions
+skip cleanly instead of failing on the wrong machine.
 
 ## Contributing
 
@@ -307,7 +491,7 @@ Contributions welcome. Some ideas:
 - **Voice messages** — TTS/STT via Telegram voice
 - **More LLM providers** — Claude, local llama.cpp
 - **Tests** — no test suite yet
-- **Linux native** — remove WSL2 dependency
+- **Linux native** — plain Linux desktop support (`xdg-open`, `wl-copy`, `grim`)
 - **Web dashboard** — optional web UI alongside Telegram
 - **Multi-user** — support multiple authorized users
 
