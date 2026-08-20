@@ -8,7 +8,7 @@
 
 set -e
 
-COMMERCE_DIR="${COMMERCE_DIR:-$HOME/Projects/Experiments/agentic-commerce}"
+COMMERCE_DIR="${COMMERCE_DIR:-$(cd "$(dirname "$0")" && pwd)/agentic-commerce}"
 PORT="${COMMERCE_PORT:-8011}"
 
 if [ ! -d "$COMMERCE_DIR" ]; then

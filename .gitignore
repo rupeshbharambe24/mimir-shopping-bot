@@ -32,3 +32,18 @@ ai-agent.service
 com.mimir.agent.plist
 com.mimir.commerce.plist
 bash.exe.stackdump
+
+# Vendored agentic-commerce: its own secrets and build artifacts.
+# The nested project keeps live OAuth tokens and API keys next to its source,
+# so these are listed explicitly rather than relying on its own .gitignore,
+# which git does not consult for a directory tracked by this repo's root.
+agentic-commerce/.env
+agentic-commerce/.venv/
+agentic-commerce/.swiggy_tokens.json
+agentic-commerce/.swiggy_client.json
+agentic-commerce/**/*.tokens.json
+agentic-commerce/logs/
+agentic-commerce/**/__pycache__/
+agentic-commerce/.pytest_cache/
+agentic-commerce/flutter_web/build/
+agentic-commerce/flutter_web/.dart_tool/

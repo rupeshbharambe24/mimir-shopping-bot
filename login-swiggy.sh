@@ -10,7 +10,7 @@
 # refreshes itself.
 
 set -e
-COMMERCE_DIR="${COMMERCE_DIR:-$HOME/Projects/Experiments/agentic-commerce}"
+COMMERCE_DIR="${COMMERCE_DIR:-$(cd "$(dirname "$0")" && pwd)/agentic-commerce}"
 
 if [ ! -x "$COMMERCE_DIR/.venv/bin/python" ]; then
     echo "[!!] Commerce venv missing. Run ./start-commerce.sh once first."

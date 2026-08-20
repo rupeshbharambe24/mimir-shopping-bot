@@ -1,0 +1,39 @@
+# Provider registry (ADR-3). Adding a provider = one entry here + its
+# adapter/manifest modules. Nothing in backend/ changes.
+#
+# capability_flags here are DECLARED intent; the registry's tools/list drift
+# check (backend/providers/registry.py:check_provider) verifies they match the
+# adapter code and that the provider's real tools match the manifest's
+# EXPECTED_TOOLS. A mismatch is surfaced, not silently tolerated.
+
+providers:
+  - id: swiggy
+    display_name: Swiggy Instamart
+    enabled: true
+    mcp_url: https://mcp.swiggy.com/im
+    # OAuth 2.1 + PKCE + dynamic client registration. NOTE: labelled from the
+    # working login flow in auth.py; confirm the exact handshake if the docs
+    # ever describe it differently.
+    auth_type: oauth2_pkce
+    adapter: backend.providers.swiggy.adapter:SwiggyAdapter
+    manifest: backend.providers.swiggy.manifest
+    capability_flags:
+      searchable_without_auth: false   # ADR-5: address-scoped, needs auth
+      supports_cart: true
+      supports_checkout: true
+      requires_pre_confirmation: true  # docs: "ALWAYS get explicit user confirmation"
+      max_order_value: 100000          # ₹1000 cap, in paise (docs)
+
+  - id: mock
+    display_name: Mock Provider (pluggability proof)
+    enabled: true
+    mcp_url: null
+    auth_type: none
+    adapter: backend.providers._mock_provider.adapter:MockAdapter
+    manifest: backend.providers._mock_provider.manifest
+    capability_flags:
+      searchable_without_auth: true    # a genuinely anonymous-searchable provider
+      supports_cart: true
+      supports_checkout: true
+      requires_pre_confirmation: true
+      max_order_value: 100000

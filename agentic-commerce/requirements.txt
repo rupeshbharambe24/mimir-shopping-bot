@@ -1,0 +1,25 @@
+# Pinned to the exact versions proven working in the existing swiggy-venv.
+# NOTE: mcp is pinned EXACTLY (==), not >=, on purpose — an unpinned install
+# silently jumped a major version mid-project last time and broke the transport
+# and CallToolResult field names. See ARCHITECTURE_DECISIONS.md risk notes and
+# backend/providers/swiggy/mcp_compat.py.
+mcp==2.0.0
+google-genai==2.18.1
+anyio==4.14.2
+httpx==0.28.1
+httpx2==2.12.0
+pydantic==2.13.4
+
+# Registry config + environment loading.
+PyYAML==6.0.2
+python-dotenv==1.0.1
+
+# Web backend (FastAPI BFF, step 5). fastapi/starlette kept recent so mcp's
+# sse-starlette dependency (starlette>=0.49.1) stays satisfied — pip check clean.
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn[standard]==0.34.0
+
+# Tests (mock-provider pluggability proof — no network).
+pytest==8.3.4
+pytest-asyncio==0.24.0
