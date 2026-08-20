@@ -241,6 +241,51 @@ refused the spend.
 
 ---
 
+## 2026-08-20 (later still) — checkout produced a payment message with no link
+
+Two separate faults, both visible only on a live run.
+
+**1. The approval handed the order to the wrong code.** On Approve, Mimir called
+the canonical `checkout()`, which hardcodes
+`{paymentMethod: "UPI", generateUPIQR: true}` and never calls
+`get_payment_options`. Swiggy's checkout tool documentation is explicit:
+
+> "Never assume or default a payment method — this tool REJECTS a call with no
+> payment method... call get_payment_options so the user picks their UPI app,
+> then pass paymentMethod="UPI" + intentApp (or generateUPIQR for desktop QR)."
+
+The adapter itself carries a `VERIFY-WRITE` note admitting those parameters were
+never exercised, and `parse_payment_intent` a `# VERIFY against a live checkout
+response` note over guessed field names (`upiIntentUrl`/`bridgeUrl`). So the
+order went out through an unverified stub and no authorization URL came back —
+hence a message saying "click the UPI link below" with nothing below it. Asking
+for a QR just repeated the same failing call, which is why it re-prompted.
+
+Fixed by re-running the turn with the money path armed instead: the agent that
+was blocked completes the order through the documented flow. Verified live —
+`get_cart` -> itemised bill, "checkout" -> `get_payment_options` offering 6 UPI
+apps, QR and COD, "pay with Google Pay" -> `checkout` blocked pending approval,
+with the approval prompt showing the real line items.
+
+**2. A provider cap that the provider denies having.** `providers.yaml` and the
+adapter declared `max_order_value: 100000` (Rs.1000), attributed to "docs". The
+checkout tool documents the opposite:
+
+> "NO CART-VALUE LIMIT: Do NOT refuse, warn about, or gate checkout on the cart
+> total — there is no value ceiling... relay that error instead of pre-empting
+> it."
+
+Rs.1000 refuses ordinary grocery orders. The provider is now described
+accurately (`max_order_value: null`) and the ceiling moved to the client as
+`COMMERCE_MAX_ORDER_RUPEES` (default 5000) — a self-imposed guard rail is a
+legitimate thing for a client to want, but it is not a fact about the provider.
+
+**Safety note:** `DRY_RUN=false` throughout this period, so the failed attempts
+were against the real endpoint. Order history confirms nothing was placed — the
+only order on the account predates the testing and was already delivered.
+
+---
+
 ## Test status
 
 | Suite | Result |
