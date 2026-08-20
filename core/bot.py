@@ -2010,6 +2010,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _run_agent_turn(update, context, text)
 
 
+# What Mimir says to the commerce agent on the user's behalf after they tap
+# Approve. Phrased as the explicit confirmation the provider's tool docs
+# require ("wait for clear confirmation") rather than a bare "yes", so the
+# model is in no doubt that the gate has been cleared.
+_CONFIRM_TEXT = (
+    "Yes, I confirm. Place the order now with the payment method we discussed. "
+    "If a payment link or QR is returned, show it to me exactly as given."
+)
+
+
 async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
     """Hand the turn to the commerce agent. Returns True if it handled it.
 
@@ -2060,6 +2070,10 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text(f"Cannot check out: {intent.get('error')}")
         return True
 
+    if over := await commerce.over_spending_cap(intent.get("total_minor")):
+        await update.message.reply_text(over)
+        return True
+
     dry = "  [DRY RUN - no real order]" if intent.get("dry_run") else ""
     approved = await guard.request_permission(
         context.bot, chat_id, "commerce_checkout",
@@ -2070,8 +2084,23 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text("Order cancelled. Nothing was charged.")
         return True
 
-    result = await commerce.checkout(chat_id, intent["confirm_token"])
-    await reply_smart(update.message, result)
+    # Re-run the turn with the money path armed, so the SAME agent that was
+    # blocked completes the order. Routing the approval into the canonical
+    # checkout() instead would place the order through a stub that hardcodes
+    # {paymentMethod: "UPI", generateUPIQR: true} and never calls
+    # get_payment_options -- which Swiggy's own tool documentation says it
+    # rejects, and which is why no payment link came back.
+    placing = await update.message.reply_text("Placing your order...")
+    data = await commerce.assistant_confirmed(chat_id, _CONFIRM_TEXT)
+    try:
+        await placing.delete()
+    except Exception:
+        pass
+
+    if not data.get("ok"):
+        await update.message.reply_text(f"Order failed: {data.get('error')}")
+        return True
+    await reply_smart(update.message, data.get("reply") or "Order submitted.")
     return True
 
 

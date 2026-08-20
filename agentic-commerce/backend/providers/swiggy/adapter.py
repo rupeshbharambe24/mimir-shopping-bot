@@ -52,14 +52,21 @@ class SwiggyAdapter:
 
     def __init__(self) -> None:
         # ADR-5: Swiggy's tools are address-scoped and require an authenticated
-        # session, so it CANNOT be searched anonymously. ADR-007: it requires
-        # pre-confirmation and declares a ₹1000 (=100_000 paise) order cap.
+        # session, so it CANNOT be searched anonymously. It requires
+        # pre-confirmation.
+        #
+        # max_order_value is None because Swiggy declares no ceiling -- its
+        # checkout tool documentation says so explicitly and instructs callers
+        # not to gate on cart total. A ₹1000 cap was previously declared here
+        # and would have refused ordinary grocery orders. A spending limit is a
+        # legitimate thing for a *client* to impose; it is not a fact about
+        # this provider.
         self.capability_flags = CapabilityFlags(
             searchable_without_auth=False,
             supports_cart=True,
             supports_checkout=True,
             requires_pre_confirmation=True,
-            max_order_value=100_000,
+            max_order_value=None,
         )
         self._stack: Optional[contextlib.AsyncExitStack] = None
         self._session: Optional[GuardedSwiggySession] = None

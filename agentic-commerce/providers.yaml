@@ -22,7 +22,12 @@ providers:
       supports_cart: true
       supports_checkout: true
       requires_pre_confirmation: true  # docs: "ALWAYS get explicit user confirmation"
-      max_order_value: 100000          # ₹1000 cap, in paise (docs)
+      # NOT a Swiggy limit. Its checkout tool states the opposite: "NO
+      # CART-VALUE LIMIT ... there is no value ceiling ... If the order is not
+      # permitted for this account, checkout itself fails and returns the
+      # reason; relay that error instead of pre-empting it." Left null so the
+      # provider is described accurately; the client imposes its own ceiling.
+      max_order_value: null
 
   - id: mock
     display_name: Mock Provider (pluggability proof)

@@ -71,6 +71,11 @@ class Config:
     # flipped by accident -- in either repo -- therefore cannot spend money.
     COMMERCE_ALLOW_LIVE = _env("COMMERCE_ALLOW_LIVE", "false").lower() in ("1", "true", "yes")
 
+    # Mimir's own spending ceiling in rupees, checked before the approval
+    # prompt is even shown. This is a self-imposed limit, not a provider one:
+    # Swiggy explicitly declares no cart-value ceiling. 0 disables the check.
+    COMMERCE_MAX_ORDER_RUPEES = int(_env("COMMERCE_MAX_ORDER_RUPEES", "5000") or 0)
+
     WORKSPACE = Path(_env("WORKSPACE", str(Path(__file__).parent)))
     LOG_FILE = Path(_env("LOG_FILE", "logs/agent.log"))
     PERMISSION_TIMEOUT = int(_env("PERMISSION_TIMEOUT", "300"))

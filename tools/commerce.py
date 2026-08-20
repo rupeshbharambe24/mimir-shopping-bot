@@ -302,6 +302,25 @@ async def payment_status(chat_id: int, order_id: str) -> str:
     return f"Order {data['order_id']}: {data['status']}  {data.get('total_display', '')}{tag}"
 
 
+async def over_spending_cap(total_minor: Optional[int]) -> Optional[str]:
+    """Why this total exceeds Mimir's own ceiling, or None.
+
+    Separate from the provider's flags on purpose: Swiggy declares no
+    cart-value limit and tells callers not to gate on it. This is the user's
+    own guard rail, so it is configured here rather than inferred from the
+    provider.
+    """
+    cap = Config.COMMERCE_MAX_ORDER_RUPEES
+    if not cap or total_minor is None:
+        return None
+    if total_minor > cap * 100:
+        return (
+            f"This order is Rs.{total_minor / 100:.2f}, over your Rs.{cap} limit. "
+            "Raise COMMERCE_MAX_ORDER_RUPEES in .env if that is intended."
+        )
+    return None
+
+
 async def live_spending_blocked(chat_id: int) -> Optional[str]:
     """Why a real spend must not proceed, or None if it may.
 

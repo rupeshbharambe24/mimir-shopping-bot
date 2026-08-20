@@ -111,7 +111,10 @@ async def test_matrix_offline_has_declared_flags():
     rows = await matrix.build_matrix(entries, adapters, live=False)
     by_id = {r.provider_id: r for r in rows}
     assert by_id["swiggy"].flags["searchable_without_auth"] is False
-    assert by_id["swiggy"].flags["max_order_value"] == 100000
+    # None, not a number: Swiggy's checkout tool documents "NO CART-VALUE
+    # LIMIT ... there is no value ceiling" and tells callers not to gate on
+    # cart total. A declared Rs.1000 cap here refused ordinary grocery orders.
+    assert by_id["swiggy"].flags["max_order_value"] is None
     assert by_id["mock"].flags["searchable_without_auth"] is True
     # offline: no live drift fields populated
     assert by_id["mock"].tool_count is None
