@@ -18,6 +18,13 @@ scattered across the app.
 
 from __future__ import annotations
 
+# Tools that spend real money. Declared per provider rather than as a global
+# constant: these are Swiggy's names, and a provider that calls the same
+# operation something else (place_order, create_order) would slip past a shared
+# set silently -- the guard would simply never match, and the block would not
+# fire. A money gate that fails open is worse than none, because it looks armed.
+DANGEROUS_TOOLS = frozenset({"checkout", "confirm_order"})
+
 from typing import Any, Optional
 
 from backend.canonical.types import (

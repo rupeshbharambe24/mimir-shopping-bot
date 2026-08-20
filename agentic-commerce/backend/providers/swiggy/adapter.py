@@ -49,6 +49,8 @@ class SwiggyAdapter:
     """Implements the ProviderAdapter Protocol for Swiggy Instamart."""
 
     id = manifest.PROVIDER_ID
+    # Read by the agent loop's money-path guard; see manifest.DANGEROUS_TOOLS.
+    dangerous_tools = manifest.DANGEROUS_TOOLS
 
     def __init__(self) -> None:
         # ADR-5: Swiggy's tools are address-scoped and require an authenticated

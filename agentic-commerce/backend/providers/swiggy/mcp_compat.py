@@ -90,8 +90,10 @@ def extract_tool_result_text(result: CallToolResult) -> str:
 # Guarded MCP session -- blocks dangerous tools unless armed
 # --------------------------------------------------------------------------
 
-# Tools that spend real money / place a real order. Blocked unless armed.
-DANGEROUS_TOOLS = {"checkout", "confirm_order"}
+# Swiggy's money-path tool names, re-exported from the manifest so there is one
+# source of truth per provider. Importing it here rather than redefining it
+# keeps the transport guard and the agent loop guarding the same set.
+from backend.providers.swiggy.manifest import DANGEROUS_TOOLS  # noqa: E402
 
 
 class GuardedSwiggySession(ClientSession):
@@ -100,9 +102,10 @@ class GuardedSwiggySession(ClientSession):
     prompt instruction). Arming is single-shot: it auto-resets after one call."""
 
     armed = False
+    dangerous_tools = DANGEROUS_TOOLS
 
     async def call_tool(self, name, arguments=None, **kwargs):
-        if name in DANGEROUS_TOOLS and not GuardedSwiggySession.armed:
+        if name in self.dangerous_tools and not GuardedSwiggySession.armed:
             return make_blocked_result(
                 f"BLOCKED: '{name}' requires explicit user confirmation before it can run."
             )

@@ -27,7 +27,18 @@ from backend.providers.base import ProviderAdapter
 
 DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
-DANGEROUS_TOOLS = {"checkout", "confirm_order"}
+# Fallback only. The real set comes from the adapter (see _dangerous_for): a
+# hardcoded set here would silently fail to guard any provider that names its
+# order-placing tool differently.
+_FALLBACK_DANGEROUS = frozenset({"checkout", "confirm_order"})
+
+
+def _dangerous_for(adapter) -> frozenset:
+    """The money-path tool names this provider declares."""
+    declared = getattr(adapter, "dangerous_tools", None)
+    if declared:
+        return frozenset(declared)
+    return _FALLBACK_DANGEROUS
 
 SYSTEM_PROMPT = """You are a grocery-ordering assistant driving a single commerce
 provider's tools (addresses, product search, cart, payment, checkout, tracking).
@@ -82,6 +93,7 @@ async def run_turn(client, adapter: ProviderAdapter, gemini_tools, history, user
     )
 
     requires_confirm = adapter.capability_flags.requires_pre_confirmation
+    dangerous = _dangerous_for(adapter)
 
     for _ in range(10):
         response = await client.aio.models.generate_content(
@@ -102,7 +114,7 @@ async def run_turn(client, adapter: ProviderAdapter, gemini_tools, history, user
         response_parts = []
         for fc in function_calls:
             args = dict(fc.args or {})
-            is_dangerous = fc.name in DANGEROUS_TOOLS
+            is_dangerous = fc.name in dangerous
             await _emit({"type": "tool_call", "name": fc.name, "args": args})
 
             if is_dangerous and requires_confirm and not armed:

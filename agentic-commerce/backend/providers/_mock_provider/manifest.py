@@ -9,6 +9,11 @@ point of the mock in step 3.
 
 from __future__ import annotations
 
+# Deliberately NOT the same names Swiggy uses. That is the point of this
+# provider: it proves the platform guards a provider by what that provider
+# declares, not by a shared list of one vendor's tool names.
+DANGEROUS_TOOLS = frozenset({"place_order", "finalize_order"})
+
 from typing import Any
 
 from backend.canonical.types import (

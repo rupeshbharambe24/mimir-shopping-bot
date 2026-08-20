@@ -51,6 +51,7 @@ _RAW_TOOLS = [
 
 class MockAdapter:
     id = manifest.PROVIDER_ID
+    dangerous_tools = manifest.DANGEROUS_TOOLS
 
     def __init__(self) -> None:
         # A genuinely anonymous-searchable provider (ADR-5): appears in
@@ -78,9 +79,23 @@ class MockAdapter:
     async def list_raw_tools(self) -> list[RawTool]:
         return list(_RAW_TOOLS)
 
+    def arm_dangerous(self) -> None:
+        """Arm the guard for exactly one dangerous-tool call."""
+        self._armed = True
+
     async def call_raw_tool(self, name: str, arguments: dict[str, Any]) -> RawToolResult:
-        # Route raw calls through the same in-memory logic; enforce the guard on
-        # the dangerous tools so behavior matches a real adapter.
+        # Route raw calls through the same in-memory logic, enforcing the same
+        # single-shot arm a real adapter does. This used to only CLAIM to guard:
+        # the comment said it did, no check existed, and place_order ran
+        # unconditionally -- so the pluggability proof never exercised the
+        # money-path guard it was supposed to demonstrate.
+        if name in self.dangerous_tools:
+            if not getattr(self, "_armed", False):
+                return RawToolResult(
+                    text=f"BLOCKED: '{name}' requires explicit user confirmation before it can run.",
+                    is_error=True,
+                )
+            self._armed = False  # single-shot, like GuardedSwiggySession
         try:
             if name == "search_items":
                 payload = [r for r in _CATALOG if arguments.get("query", "").lower() in r["label"].lower()]

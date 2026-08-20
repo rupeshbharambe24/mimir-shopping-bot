@@ -19,3 +19,5 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+.zepto_tokens.json
+.zepto_client.json

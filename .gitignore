@@ -47,3 +47,7 @@ agentic-commerce/**/__pycache__/
 agentic-commerce/.pytest_cache/
 agentic-commerce/flutter_web/build/
 agentic-commerce/flutter_web/.dart_tool/
+agentic-commerce/.zepto_tokens.json
+agentic-commerce/.zepto_client.json
+agentic-commerce/backend/providers/.zepto_tokens.json
+agentic-commerce/backend/providers/.zepto_client.json
