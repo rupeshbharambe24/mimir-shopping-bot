@@ -1,12 +1,331 @@
 # Change log
 
-Hand-maintained because these changes are not committed yet. Everything below
-lives in the working tree on branch `macos-support`, uncommitted, and runs
-locally. When you are ready to commit, this file is the commit-message source.
+Hand-maintained, newest first, and the source these commit messages are
+written from. Each entry records why a change was made rather than what
+changed -- the diff already says what.
 
-Nothing here was authored under the RBIH account. No git identity is configured
-in this repo (`git config user.name`/`user.email` are both unset), so no commit
-can be attributed to anyone by accident.
+Nothing here is authored under the RBIH account. This repository commits under
+a personal identity (`git config --local user.name` / `user.email`), set at the
+repository level so a global default cannot silently attribute work to the
+wrong account.
+
+---
+
+## 2026-08-21 (latest) — Swiggy Food actually works
+
+Food was registered, guarded, flag-checked and completely non-functional. Auth
+was fine and all 17 expected tool names existed on the live server; every call
+still failed. Three separate defects, none of which the existing tests could
+see.
+
+**1. `addressId` is required on six Food tools.** Swiggy's published reference
+does not mark it required. The live schema does — `search_restaurants`,
+`search_menu`, `get_restaurant_menu`, `get_food_cart`, `update_food_cart` and
+`place_food_order` all answer a bare `addressId is required`. Instamart's
+adapter has carried a `_resolve_address_id` since it was written; the shared
+service adapter shipped without one. Now resolved from `get_addresses`, cached,
+and injected — including into `call_raw_tool`, so the agent loop is covered when
+the model forgets to call `get_addresses` first.
+
+**2. Both new parsers raised TypeError on their first line.** `CanonicalProduct`
+takes `provider_id` as its first field and neither manifest passed it;
+`CanonicalCartItem` has no `unit_price` and no `raw`. Dineout had the same bug.
+Neither parser had ever been run against a real response — the Food tests
+asserted tool names, endpoints, guards and capability flags, and all of them
+passed green over parsers that could not construct a single row.
+
+**3. The field names were wrong, and the casing is not consistent within one
+service.** Verified live and corrected:
+
+| | expected | actual |
+|---|---|---|
+| restaurant id | `restaurantId` | `id` |
+| open/closed | `isOpen` (bool) | `availabilityStatus: "OPEN"` (**string**) |
+| cart item id | `itemId` | `menu_item_id` |
+| cart total | `toPay` | `data.pricing.to_pay` |
+
+`search_restaurants` returns camelCase, `get_food_cart` returns snake_case, and
+`search_menu` mixes both in one object (`menu_item_id` beside `inStock`).
+
+The availability one failed in the dangerous direction: no `isOpen` key meant
+the `True` default won, and **every closed restaurant reported as open**. The
+total failed in the safe direction — an em dash rather than a confident ₹0.00.
+
+`costForTwo` arrives as the string `"₹1500 for two"`, which `to_money` cannot
+parse and shouldn't: it is an estimate for two people, not a price anyone pays.
+It now goes in `unit` alongside cuisine, rating and ETA, so the renderer never
+announces "Cheapest: ₹1500" about a number that is not the cost of anything
+orderable. Unit price reads `final_price`, not `total` — `total` includes addons
+and would multiply them by the quantity a second time in `line_total_minor`.
+
+**4. Switching service never connected it.** Connection is tracked per provider
+id and Swiggy is three ids, so `/connect swiggy` left `swiggy_food` unconnected.
+Choosing Food then failed with "Provider 'swiggy_food' is not connected", and
+the bot's advice for that error was hardcoded to "try /connect swiggy" — which
+the user had already done, and which would not have helped. `_apply_service` now
+selects *and* connects (one shared token, so it is a cached read), and the error
+names the service that is actually unconnected.
+
+**Verified live**: search returns 10 restaurants, the cart parses to ₹442 with
+its itemised bill (₹349 + ₹40 delivery + ₹52.73 tax), and a closed restaurant
+now reads as closed.
+
+Dineout's 12 tools are confirmed live too (one undocumented:
+`render_restaurants_dineout`). Its response shapes remain unverified — reading
+them needs a booking flow against a real restaurant, which commits to a table.
+
+19 new tests, built from payloads captured off the live server rather than from
+the docs, since the docs are what produced all of the above.
+
+---
+
+## 2026-08-21 — OAuth failures now say what the server said
+
+`login-zepto.sh` died with a 30-line traceback ending in `HTTP Error 500:
+Internal Server Error`. The response body, which urllib throws away, was:
+
+    {"error":"server_error",
+     "message":"OOM command not allowed when used memory > 'maxmemory'."}
+
+That is Redis refusing writes at its `maxmemory` limit under a `noeviction`
+policy — Zepto's authorization server accepts the registration and cannot store
+the result. Every new client registration against them is failing, not just
+ours. Verified: three attempts over 15s, all identical; their discovery
+documents, JWKS and `/authorize` all still answer 200/307, so only the
+registration endpoint is affected. The same code path against Swiggy's
+`/auth/register` returns 201, which rules out our payload shape.
+
+Nothing here was wrong, and nothing here could be changed to fix it. But the
+error that surfaced could not tell you that, so:
+
+- **`_post_json`** now wraps all three OAuth POSTs (registration, token
+  exchange, token refresh). On failure it reads the server's body and raises
+  `AuthServerError` carrying `status` and `body`, preferring the OAuth
+  `error_description` / `message` field for the message text.
+- **`is_provider_fault`** distinguishes 5xx from 4xx — the property that decides
+  whether the user should change something or simply wait.
+- **A timeout on every request.** `urlopen` defaults to none, and these run
+  interactively behind a 180s browser wait, so a hung endpoint blocked the login
+  forever with nothing on screen.
+- **A 200 with no `client_id` no longer raises `KeyError`**, and no longer
+  writes a cache file — a poisoned cache would have broken every later login
+  with a different, more confusing error.
+- Both `login-swiggy.sh` and `login-zepto.sh` catch it and print the cause plus
+  whose fault it is, instead of a traceback. Ctrl-C is handled too.
+
+The same failure now reads:
+
+    [!!] Zepto client registration failed: HTTP 500 -- OOM command not allowed
+         when used memory > 'maxmemory'.
+
+         That is a fault on Zepto's side, not a problem with this machine or
+         your account -- their auth server accepted the request and failed to
+         store the result. Nothing here can fix it; try again later.
+
+7 new tests.
+
+---
+
+## 2026-08-20 — Dineout booking, and an honest payment picker
+
+**Booking had no way to be approved.** `/checkout/intent` reads a cart and
+fingerprints it; Dineout has no `get_cart` at all, so `book_table` was blocked
+by the loop with nothing able to arm it — safe, but the feature simply did not
+work.
+
+- `run_turn` now emits a `blocked` event carrying the refused tool's **name and
+  arguments**. A caller told only "something was blocked" has to guess what to
+  put in the approval prompt, and with no cart to read there is nothing else to
+  reconstruct the request from. The *last* refusal is reported, not the first:
+  if the model retried with corrected arguments, the approval must describe what
+  it would actually do now.
+- New `POST /action/intent` mints a single-use token bound to
+  `action_fingerprint(provider, tool, args)` — the same idea as the cart
+  fingerprint, for the same reason. Approving "book a table" would otherwise
+  authorise whatever slot, restaurant and party size the agent sent next. Change
+  the time and the token is void.
+- The endpoint refuses any tool the provider does not itself declare dangerous.
+  Accepting an arbitrary name would turn it into a way to pre-authorise any
+  call, which is the opposite of its purpose.
+- `_describe_action` shows every argument, listing the readable ones first and
+  appending the rest rather than dropping them. A prompt that silently hides a
+  parameter hides exactly what the user cannot check.
+
+**Bookings are never auto-approved**, and the reason is not the amount. A free
+reservation measures ₹0 against every rupee ceiling, so it would pass all of
+them without limit. The routing keeps it out: `_confirm_action` never consults
+`_autopay_decision`, and a test asserts that. Its permission action is
+`commerce_booking`, distinct from `commerce_checkout`, so an approval for one is
+not an approval for the other. Swiggy's docs also say a booking cannot be
+cancelled through the MCP.
+
+**`/pay` — and the answer to "can it pay by card or wallet automatically?"**
+
+No, and not because of a design choice here:
+
+- `get_payment_options` returns UPI apps, scan-QR and cash. Its own docs state
+  that even *"UPI Collect and saved VPAs are not surfaced"*. There is no card,
+  no wallet, no netbanking, no auto-debit. A card saved in the user's Swiggy
+  account is not reachable from the MCP.
+- `checkout` accepts `paymentMethod` of only `"UPI"` or `"Cash"`.
+- For UPI, Swiggy returns a `upiIntentUrl` for the **human** to complete; the
+  agent only polls `check_payment_status`.
+- RBI's Authentication Mechanisms Directions, 2025 require two factors, at least
+  one dynamic, on every domestic digital payment from 1 April 2026. A server
+  holding a token is neither.
+
+So `/pay` offers exactly two methods and labels which is hands-free: **cash on
+delivery is the only combination that needs nothing at pay time**. Tests assert
+the picker never grows a card or wallet button, since that would be a control
+that cannot work.
+
+**# VERIFY, raised priority.** Swiggy's `checkout` reference page now describes a
+workflow step "verify cart total is below ₹1,000". The adapter currently
+declares `max_order_value=None`, citing that same tool's text saying there is no
+cart-value ceiling. Both cannot be current. One live read settles it; until then
+Mimir's own `COMMERCE_MAX_ORDER_RUPEES` is doing the limiting.
+
+12 new tests (9 bot, 3 sidecar).
+
+---
+
+## 2026-08-20 — Swiggy Food + Dineout, service choice, auto-approve
+
+Swiggy runs three MCP servers behind one OAuth identity. Mimir spoke to one.
+
+**Two money-path defects had to be fixed before the other two could be added
+at all**, both the same shape: state that was per-class where it needed to be
+per-service.
+
+- `GuardedSwiggySession.armed` was a **class attribute**. With three services
+  connectable in one process, arming Instamart's `checkout` also armed Food's
+  `place_food_order` and Dineout's `book_table` — one approval, three unlocked
+  money paths — and the auto-reset after a call disarmed a sibling mid-turn.
+  Now per instance. `test_the_armed_flag_is_not_shared_state_on_the_class`
+  asserts on the class dict rather than on two instances, because instance
+  assignment shadows a class attribute and would have passed either way. That
+  is how it hid.
+- `SwiggyAdapter.call_raw_tool`'s DRY_RUN short-circuit compared against the
+  literal `("checkout", "confirm_order")`. Food's spend tool is
+  `place_food_order`, so **a DRY_RUN the operator believed was faking every
+  spend would have placed a real order.** Now reads `self.dangerous_tools`.
+
+**New providers** — `swiggy_food` and `swiggy_dineout`, registered separately so
+each carries its own money-path set, capability flags and drift check. Dineout
+declares `supports_checkout=False`: booking a table is not placing an order, and
+`book_table` is gated as a spend anyway because a free reservation still commits
+the user's evening and cannot be cancelled through the MCP.
+
+Tool names come from Swiggy's published reference, **not a live `tools/list`** —
+marked `# VERIFY` throughout. The docs are known-unreliable here: Instamart's
+listed 16 tools against 14 live, and Swiggy's own pages disagree on the Food
+count (14 vs 17). `scripts/discover_swiggy.py` diffs the live surface against a
+manifest and flags any tool that looks like a spend but is not guarded.
+
+The existing `test_every_provider_can_actually_clear_its_cart` caught a real gap
+on the way in: Food mapped `flush_food_cart` but had no `clear_cart`, so
+emptying would have fallen back to `update_cart([])` — which reports success
+without clearing.
+
+**Service choice** — `/service` picks groceries, food or a table, with buttons on
+first use and `/service food` once you know. Stored per chat AND selected on the
+BFF; storing only one leaves the two disagreeing after either process restarts,
+and the symptom is groceries being searched when the user asked for a table.
+Results are labelled per service — a restaurant is not "in stock" — and numbered,
+because the answer to a list is usually "the second one".
+
+**Auto-approve** (`/autopay`) — off by default, and bounded on three axes: an
+operator master switch that overrides any saved preference, a per-order limit the
+user picks (clamped), and a **rolling daily total**. The daily cap is the
+load-bearing one: a per-order limit alone bounds nothing, since an agent looping
+on checkout places many small orders rather than one large one. Toggling off and
+on does not reset the day's total, or the cap would be bypassed by flicking the
+switch. An unreadable total is never auto-approved — `None` means "we could not
+parse the price", not "it is free", and several manifests still carry `# VERIFY`
+on that field.
+
+Named honestly: **Swiggy's MCP exposes no wallet and no saved card.** Payment is
+UPI (opens your app), scan-QR, or cash. This automates the approval, not the
+payment, and the user is told so on every auto-approved order.
+
+`_format_results` read `data["provider"]`; the BFF returns `provider_id`. Caught
+before it shipped — it fails silently, rendering every service with the generic
+fallback while nothing looks broken.
+
+35 new tests (19 bot, 12 sidecar, plus rendering).
+
+---
+
+## 2026-08-20 — voice notes
+
+Send a voice message; Mimir transcribes it with Sarvam and runs it as if typed.
+
+- **`tools/voice.py`** — `transcribe()` never raises and never guesses. A failed
+  transcription is reported; inventing a plausible order out of noise is the one
+  behaviour that would make voice dangerous on a bot holding a real cart.
+- **No transcoding.** Telegram voice notes are OGG/Opus and Sarvam accepts both,
+  so the bytes go up exactly as they arrived — no ffmpeg dependency.
+- **30 s ceiling, checked before the upload.** Sarvam's sync endpoint caps at
+  30 s; Telegram hands us `voice.duration` in the update, so a 10-minute note
+  costs nothing to refuse.
+- **`saaras:v3`, env-overridable.** Ported reference code pinned `saarika:v2.5`,
+  which Sarvam has since made legacy and is deprecating. This is the third
+  hosted model to move under us after `llama-3.3-70b-versatile` and
+  `gemini-2.0-flash`, so `SARVAM_MODEL` is configurable like the other two.
+- **The transcript is echoed back.** Speech recognition is confident even when
+  wrong, and Saaras auto-detects across 22 languages — the user has to see what
+  Mimir thinks it heard before it acts.
+- **A spoken "yes" authorises nothing.** The transcript re-enters at
+  `_run_agent_turn`, the same entry point typed text uses; approval is still a
+  `callback_query`, which no transcriber can produce. `tests/test_voice.py`
+  asserts `handle_voice` reaches `_run_agent_turn` and never
+  `handle_callback` / `assistant_confirmed` / `commerce.checkout`.
+- No text normalisation of transcripts. The obvious punctuation filter
+  `[^\w\s-]` strips every matra out of Devanagari — Python's `\w` excludes
+  combining marks — so "मुझे प्रोटीन" becomes "म झ प र ट न". Regression pinned.
+- Registered in both modes, unlike the document receiver: speaking your order is
+  part of the shopping surface.
+
+19 new tests. README: Swiggy publishes **three** MCP servers (`/im`, `/food`,
+`/dineout`) on one OAuth identity — we speak to one. Both Swiggy's and Zomato's
+manifests state third-party app development is not permitted at this time.
+
+---
+
+## 2026-08-20 — the Telegram menu is commerce-only
+
+`BOT_MODE` previously gated only the LLM's tool set; all 47 slash commands
+stayed registered and every one of them stayed in the Telegram menu. The bot
+presented itself as a machine controller that also shops.
+
+- **`Config.BOT_MODE` / `Config.SHOPPING_ONLY`** — the switch moved out of
+  `tools_registry` into `config.py`, so the menu, the handler registration and
+  the model's tool set all read one value instead of three.
+- **Menu**: 47 entries -> 10. `_COMMERCE_COMMANDS` (shop, search, cart,
+  providers, connect, start, help, status, persona, stop) is the default;
+  `_SYSTEM_COMMANDS` is appended only under `BOT_MODE=full`.
+- **Registration is gated too, not just the menu.** Hiding a command that still
+  runs when typed makes the menu a false statement about the bot. `/cmd`,
+  `/write`, `/commit`, `/screenshot` and the rest now return *unknown command*
+  in shopping mode.
+- `handle_message`'s two developer preambles moved into
+  `_handle_system_text_modes`, skipped in shopping mode. The file picker
+  consumed any bare number — in a shopping chat "2" means two packs far more
+  often than it means the second search result. Unreachable today because
+  `/find` and `/send` are unregistered; now unreachable by decision.
+- The **document receiver** is full-mode only: saving whatever arrives into the
+  workspace is a filesystem write with no part in shopping. Receipts still go
+  out through the `send_file` tool, which stays in `_SHOPPING_EXTRAS`.
+- `CallbackQueryHandler` stays registered in both modes — the Approve/Cancel
+  tap on an order is a `callback_query`, and it is the one thing on the money
+  path that must always land.
+- Kept: `/persona` (every entry in `PERSONAS` is a shopping persona, so it is a
+  tone dial on this surface) and `/status` (the `status` *tool* is already in
+  `_SHOPPING_EXTRAS` for the same reason — "are you alive?" is fair mid-order).
+- README: `/compare` in the shopping table was renamed to `/search` three
+  entries ago and never updated here.
+
+No files deleted; `BOT_MODE=full` restores everything.
 
 ---
 

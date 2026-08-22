@@ -213,3 +213,47 @@ async def test_add_to_cart_requires_a_product_id():
 async def test_search_requires_a_query():
     out = await tools_registry.execute("commerce_search", {}, chat_id=7)
     assert "needs a query" in out
+
+
+# ── service-aware result rendering ───────────────────────────────────
+
+def test_results_are_labelled_for_the_service_being_used():
+    """A restaurant is not "in stock" and a table is not a product.
+
+    The provider id arrives from the BFF as `provider_id`. Reading the wrong key
+    fails silently -- every service renders with the generic fallback and
+    nothing looks broken -- so this pins the label per service.
+    """
+    from tools.commerce import _format_results
+
+    items = [{"name": "Bourbon", "price_display": "₹21.00", "price_minor": 2100, "unit": "120 g"}]
+
+    grocery = _format_results("biscuits", items, [], "swiggy")
+    assert "in stock" in grocery
+    assert "how many" in grocery.lower()
+
+    food = _format_results("butter chicken", items, [], "swiggy_food")
+    assert "open now" in food
+    assert "menu" in food.lower()
+
+    dineout = _format_results("italian", items, [], "swiggy_dineout")
+    assert "bookable" in dineout
+    assert "table" in dineout.lower()
+
+
+def test_results_are_numbered_so_the_user_can_say_two():
+    from tools.commerce import _format_results
+
+    items = [
+        {"name": "A", "price_display": "₹10", "price_minor": 1000},
+        {"name": "B", "price_display": "₹20", "price_minor": 2000},
+    ]
+    out = _format_results("x", items, [], "swiggy")
+    assert "<b>1.</b>" in out and "<b>2.</b>" in out
+
+
+def test_an_unknown_provider_falls_back_without_crashing():
+    from tools.commerce import _format_results
+
+    out = _format_results("x", [{"name": "A", "price_display": "₹1", "price_minor": 100}], [], None)
+    assert "A" in out

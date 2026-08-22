@@ -97,6 +97,24 @@ class PendingConfirmation:
         return True, ""
 
 
+def action_fingerprint(provider_id: str, name: str, args: dict) -> str:
+    """Stable hash of the exact call the user is agreeing to.
+
+    The cart-bound token exists because "checkout is approved" authorises
+    whatever the cart holds when the call lands. A booking has the same hole in
+    a different shape: approving "book a table" would authorise whatever slot,
+    restaurant and party size the agent sends next. Binding to the arguments
+    closes it -- change the time and the token is void.
+    """
+    payload = json.dumps(
+        {"provider": provider_id, "tool": name, "args": args},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+
 def cart_fingerprint(cart: CanonicalCart) -> str:
     """Stable hash of what the user is agreeing to buy."""
     payload = json.dumps(
@@ -728,13 +746,105 @@ async def agent_message(body: AgentMessage, request: Request, response: Response
         and "BLOCKED" in (ev.get("text") or "")
         for ev in events
     )
+    blocked_events = [ev for ev in events if ev.get("type") == "blocked"]
+    # The LAST refused call, not the first: if the model retried with corrected
+    # arguments, the approval must describe what it would actually do now.
+    blocked_action = (
+        {"name": blocked_events[-1]["name"], "args": blocked_events[-1].get("args") or {}}
+        if blocked_events else None
+    )
 
     return {
         "ok": True,
         "reply": reply,
         "blocked_on_confirmation": blocked,
+        "blocked_action": blocked_action,
         "tools_used": [ev["name"] for ev in events if ev.get("type") == "tool_call"],
     }
+
+
+class ActionIntentRequest(BaseModel):
+    name: str
+    args: dict = {}
+
+
+@app.post("/action/intent")
+async def action_intent(body: ActionIntentRequest, request: Request, response: Response):
+    """Mint a single-use token for one exact non-cart commitment.
+
+    The sibling of /checkout/intent, for providers that commit a user to
+    something without a cart to read -- Dineout books tables and has no
+    get_cart. Spends nothing.
+
+    The tool named here MUST be one the provider itself declares dangerous.
+    Accepting any tool name would turn this endpoint into a way to pre-authorise
+    an arbitrary call, which is the opposite of what it is for.
+    """
+    s = _get_session(request, response)
+    adapter, err = _active_adapter(s)
+    if err:
+        return err
+
+    dangerous = set(getattr(adapter, "dangerous_tools", ()) or ())
+    if body.name not in dangerous:
+        return {
+            "ok": False,
+            "error": (
+                f"'{body.name}' is not a money-path tool for {s.selected}; "
+                "it needs no confirmation and none will be minted."
+            ),
+        }
+
+    pc = PendingConfirmation(
+        token=secrets.token_urlsafe(24),
+        provider_id=s.selected,
+        cart_fingerprint=action_fingerprint(s.selected, body.name, body.args),
+        total_minor=None,
+        summary=_describe_action(body.name, body.args),
+        created_at=time.time(),
+    )
+    s.pending[pc.token] = pc
+    return {
+        "ok": True,
+        "confirm_token": pc.token,
+        "summary": pc.summary,
+        "tool": body.name,
+        "args": body.args,
+        "expires_in_s": CONFIRM_TTL_S,
+        "dry_run": os.environ.get("DRY_RUN", "true").strip().lower() in ("1", "true", "yes"),
+    }
+
+
+# Argument names worth showing a human, in the order they read naturally in a
+# sentence. Anything else is appended afterwards rather than dropped: an
+# approval prompt that silently hides a parameter is worse than an untidy one.
+_ACTION_FIELDS = (
+    ("restaurantName", "Restaurant"), ("restaurant", "Restaurant"),
+    ("restaurantId", "Restaurant id"),
+    ("date", "Date"), ("slotTime", "Time"), ("time", "Time"), ("slotId", "Slot"),
+    ("partySize", "Party size"), ("guests", "Guests"), ("covers", "Guests"),
+    ("addressId", "Address"), ("paymentMethod", "Payment"), ("intentApp", "UPI app"),
+)
+
+
+def _describe_action(name: str, args: dict) -> str:
+    verb = {
+        "book_table": "Book a table",
+        "place_food_order": "Place this food order",
+        "checkout": "Place this order",
+        "confirm_order": "Confirm this order",
+    }.get(name, f"Run {name}")
+
+    lines = [verb, ""]
+    shown = set()
+    for key, label in _ACTION_FIELDS:
+        if key in args and args[key] not in (None, ""):
+            lines.append(f"{label}: {args[key]}")
+            shown.add(key)
+    for key, value in sorted(args.items()):
+        if key not in shown and value not in (None, "", [], {}):
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines).rstrip()
 
 
 @app.post("/agent/reset")

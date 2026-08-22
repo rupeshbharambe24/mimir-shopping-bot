@@ -76,6 +76,52 @@ class Config:
     # Swiggy explicitly declares no cart-value ceiling. 0 disables the check.
     COMMERCE_MAX_ORDER_RUPEES = int(_env("COMMERCE_MAX_ORDER_RUPEES", "5000") or 0)
 
+    # ── Voice notes (Sarvam speech-to-text) ──────────────────────
+    # Optional. Unset simply means voice notes are declined with a note
+    # saying so, rather than silently ignored -- a voice message that
+    # vanishes reads as a broken bot.
+    SARVAM_API_KEY = _env("SARVAM_API_KEY")
+
+    # Env-configurable and NOT pinned to a dated build, for exactly the reason
+    # GROQ_MODEL and GEMINI_MODEL are not: hosted models get retired. Sarvam
+    # has already moved the default from saarika:v2.5 to saaras:v3 and marked
+    # saarika legacy, so a hardcoded name here is the same time bomb a third
+    # time over.
+    SARVAM_MODEL = _env("SARVAM_MODEL", "saaras:v3")
+
+    # "unknown" lets Saaras auto-detect across the 22 Indian languages rather
+    # than forcing English onto someone who spoke Hindi or Kannada.
+    SARVAM_LANGUAGE = _env("SARVAM_LANGUAGE", "unknown")
+
+    # ── Auto-approve ("autopay") ─────────────────────────────────
+    # Lets a user skip the tap for small orders. OFF for everyone unless they
+    # turn it on, and bounded even then.
+    #
+    # These are the ceilings the USER cannot raise from chat. The per-order
+    # limit they pick is clamped to the first; the second is a rolling daily
+    # total, because a per-order limit alone bounds nothing -- an agent looping
+    # on checkout places many small orders, not one big one.
+    COMMERCE_AUTOPAY_MAX_RUPEES = int(_env("COMMERCE_AUTOPAY_MAX_RUPEES", "500") or 0)
+    COMMERCE_AUTOPAY_DAILY_RUPEES = int(_env("COMMERCE_AUTOPAY_DAILY_RUPEES", "1500") or 0)
+
+    # A master switch for the operator. With this false, no chat can enable
+    # auto-approve at all, whatever their saved preference says -- so a stored
+    # setting cannot outlive the operator's decision to allow the feature.
+    COMMERCE_AUTOPAY_ENABLED = _env("COMMERCE_AUTOPAY_ENABLED", "false").lower() in ("1", "true", "yes")
+
+    # ── Bot surface ──────────────────────────────────────────────
+    # Mimir ships as a shopping assistant, so the default surface is the
+    # commerce one: only those slash commands are registered, and only the
+    # commerce tools reach the model. The developer tooling -- files, shell,
+    # git, notebooks, screenshots -- stays in the tree and comes back whole
+    # with BOT_MODE=full.
+    #
+    # Registration is gated rather than the menu alone, because a command
+    # hidden from the menu but still live when typed is a menu that lies about
+    # what the bot can do. One switch, one answer.
+    BOT_MODE = _env("BOT_MODE", "shopping").lower()
+    SHOPPING_ONLY = BOT_MODE != "full"
+
     WORKSPACE = Path(_env("WORKSPACE", str(Path(__file__).parent)))
     LOG_FILE = Path(_env("LOG_FILE", "logs/agent.log"))
     PERMISSION_TIMEOUT = int(_env("PERMISSION_TIMEOUT", "300"))

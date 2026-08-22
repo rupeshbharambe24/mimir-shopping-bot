@@ -123,6 +123,12 @@ async def run_turn(client, adapter: ProviderAdapter, gemini_tools, history, user
                     "Ask the user to confirm the order (which arms placement), then retry."
                 )
                 is_error = True
+                # Report the exact call that was refused, arguments included.
+                # A caller told only "something was blocked" has to guess what
+                # to put in the approval prompt, and for a provider with no cart
+                # to read -- Dineout books tables, it has no get_cart -- there is
+                # nothing else to reconstruct the request from.
+                await _emit({"type": "blocked", "name": fc.name, "args": args})
             else:
                 if is_dangerous and armed and hasattr(adapter, "arm_dangerous"):
                     adapter.arm_dangerous()  # single-shot arm of the in-transport guard

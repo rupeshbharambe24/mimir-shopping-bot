@@ -7,10 +7,10 @@ rather than exceptions or the model cannot recover from them.
 """
 
 import logging
-import os
 import re
 from pathlib import Path
 
+from config import Config
 from core import paths, platform as host, session
 from tools import commerce, file_ops, process_ops, system_info
 
@@ -357,15 +357,13 @@ _SYSTEM_SCHEMAS = TOOL_SCHEMAS
 # an invoice or receipt reaches the user, and status answers "are you alive?".
 _SHOPPING_EXTRAS = {"send_file", "status"}
 
-_MODE = os.getenv("BOT_MODE", "shopping").strip().lower()
-
-if _MODE == "full":
-    TOOL_SCHEMAS = _SYSTEM_SCHEMAS + _COMMERCE_SCHEMAS
-else:
+if Config.SHOPPING_ONLY:
     TOOL_SCHEMAS = [
         s for s in _SYSTEM_SCHEMAS
         if s["function"]["name"] in _SHOPPING_EXTRAS
     ] + _COMMERCE_SCHEMAS
+else:
+    TOOL_SCHEMAS = _SYSTEM_SCHEMAS + _COMMERCE_SCHEMAS
 
 
 _TAG = re.compile(r"</?[a-zA-Z][^>]*>")

@@ -37,18 +37,23 @@ except ImportError:  # pragma: no cover - depends on installed mcp version
 
 
 @contextlib.asynccontextmanager
-async def open_swiggy_stream(access_token: str):
-    """Yields (read_stream, write_stream) for the Swiggy MCP endpoint,
+async def open_swiggy_stream(access_token: str, mcp_url: str = SWIGGY_MCP_URL):
+    """Yields (read_stream, write_stream) for a Swiggy MCP endpoint,
     authenticated with the given bearer token, regardless of which mcp SDK
-    generation is installed. The bearer token only ever goes to mcp.swiggy.com."""
+    generation is installed. The bearer token only ever goes to mcp.swiggy.com.
+
+    `mcp_url` selects the service. Swiggy runs three MCP servers behind one
+    OAuth identity -- /im (Instamart), /food and /dineout -- so the same token
+    opens any of them and only the URL differs.
+    """
     headers = {"Authorization": f"Bearer {access_token}"}
 
     if _MCP_CLIENT_GEN == "legacy":
-        async with _raw_mcp_http_client(SWIGGY_MCP_URL, headers=headers) as streams:
+        async with _raw_mcp_http_client(mcp_url, headers=headers) as streams:
             yield streams[0], streams[1]
     else:
         async with httpx2.AsyncClient(headers=headers) as http_client:
-            async with _raw_mcp_http_client(SWIGGY_MCP_URL, http_client=http_client) as streams:
+            async with _raw_mcp_http_client(mcp_url, http_client=http_client) as streams:
                 yield streams[0], streams[1]
 
 
@@ -99,17 +104,34 @@ from backend.providers.swiggy.manifest import DANGEROUS_TOOLS  # noqa: E402
 class GuardedSwiggySession(ClientSession):
     """Same as ClientSession, but refuses to actually execute the dangerous
     tools unless `.armed` is True for this call. Enforced in Python (not just a
-    prompt instruction). Arming is single-shot: it auto-resets after one call."""
+    prompt instruction). Arming is single-shot: it auto-resets after one call.
 
-    armed = False
-    dangerous_tools = DANGEROUS_TOOLS
+    `armed` and `dangerous_tools` are PER INSTANCE, and that is load-bearing now
+    that three Swiggy services can be connected at once in one process. As class
+    attributes -- which is how this started -- arming Instamart's checkout also
+    armed Food's `place_food_order` and Dineout's `book_table`, because every
+    session shared the one flag. One approval would have unlocked three money
+    paths, and the reset after the call would have disarmed a sibling mid-turn.
+
+    `dangerous_tools` defaults to Instamart's set only so existing callers keep
+    working; every adapter passes its own. A service whose money tool is named
+    something else -- Food calls it `place_food_order`, not `checkout` -- would
+    otherwise never match the set, the guard would never fire, and nothing would
+    raise. A money gate that fails open is worse than none, because everything
+    upstream is written believing it holds.
+    """
+
+    def __init__(self, *args, dangerous_tools=DANGEROUS_TOOLS, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.armed = False
+        self.dangerous_tools = frozenset(dangerous_tools)
 
     async def call_tool(self, name, arguments=None, **kwargs):
-        if name in self.dangerous_tools and not GuardedSwiggySession.armed:
+        if name in self.dangerous_tools and not self.armed:
             return make_blocked_result(
                 f"BLOCKED: '{name}' requires explicit user confirmation before it can run."
             )
         try:
             return await super().call_tool(name, arguments, **kwargs)
         finally:
-            GuardedSwiggySession.armed = False  # single-turn arm only
+            self.armed = False  # single-turn arm only

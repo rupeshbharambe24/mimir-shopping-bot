@@ -1,10 +1,17 @@
 import asyncio
 import functools
+import html
 import logging
 import re
 from pathlib import Path
 
-from telegram import Update, BotCommand, InputFile
+from telegram import (
+    Update,
+    BotCommand,
+    InputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -22,7 +29,7 @@ from core.notebook import NotebookManager
 from core import brain, agent, paths, session
 from core import platform as host
 from core.monitor import ProcessMonitor
-from tools import commerce, file_ops, process_ops, screenshot, system_info, git_ops
+from tools import commerce, file_ops, process_ops, screenshot, system_info, git_ops, voice
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +327,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "No tap, no order. Every time.\n"
         "\n"
         "\U0001F4A1  <code>/help</code> \u2014 everything I can do\n"
+        "\U0001F944  <code>/service</code> \u2014 groceries, food, or a table\n"
         "\U0001F6D2  <code>/providers</code> \u2014 which stores are connected",
         use_html=True,
     )
@@ -340,8 +348,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
         "\n"
         "<b>Shortcuts</b>\n"
+        "  <code>/service</code>  \u2014  groceries \u00b7 food \u00b7 a table\n"
         "  <code>/search</code> <i>item</i>  \u2014  look something up\n"
         "  <code>/cart</code>  \u2014  what's in your basket\n"
+        "  <code>/autopay</code>  \u2014  auto-approve small orders\n"
         "  <code>/providers</code>  \u2014  connected stores\n"
         "  <code>/connect</code> <i>store</i>  \u2014  log in to a store\n"
         "\n"
@@ -1917,6 +1927,277 @@ async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _run_agent_turn(update, context, text)
 
 
+# The three Swiggy services, in the order they are offered. Ids match
+# providers.yaml; the bot never invents a provider id of its own.
+SERVICES = (
+    ("swiggy",         "\U0001F6D2", "Instamart",   "Groceries in minutes"),
+    ("swiggy_food",    "\U0001F35B", "Food",        "Restaurant delivery"),
+    ("swiggy_dineout", "\U0001F37D",  "Dineout",     "Book a table"),
+)
+_SERVICE_BY_ID = {s[0]: s for s in SERVICES}
+
+
+def _service_keyboard(current: str | None) -> InlineKeyboardMarkup:
+    rows = []
+    for pid, icon, name, blurb in SERVICES:
+        mark = "\u2705 " if pid == current else ""
+        rows.append([InlineKeyboardButton(f"{mark}{icon}  {name} \u2014 {blurb}",
+                                          callback_data=f"svc:{pid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+_SERVICE_PROMPTS = {
+    "swiggy": "Tell me what you need \u2014 <i>\u201cmilk and bread\u201d</i>, "
+              "<i>\u201c2 packs of bourbon biscuits\u201d</i>.",
+    "swiggy_food": "What are you hungry for? <i>\u201cbutter chicken near me\u201d</i>, "
+                   "<i>\u201cpizza under 300\u201d</i>.",
+    "swiggy_dineout": "Where and when? <i>\u201ctable for 2 in Koramangala "
+                      "Saturday 8pm\u201d</i>.",
+}
+
+
+def _service_prompt(provider_id: str | None) -> str:
+    return _SERVICE_PROMPTS.get(provider_id or "", "What are you after?")
+
+
+def _service_label(provider_id: str | None) -> str:
+    entry = _SERVICE_BY_ID.get(provider_id or "")
+    return f"{entry[1]} {entry[2]}" if entry else "not chosen yet"
+
+
+@authorized
+async def cmd_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Choose or change what you are shopping for. Usage: /service [name]"""
+    chat_id = update.effective_chat.id
+    current = session.get_service(chat_id)
+
+    # Accept "/service food" as well as the buttons -- typing is faster once you
+    # know what you want, and the buttons are for the first time.
+    if context.args:
+        wanted = " ".join(context.args).strip().lower()
+        match = next(
+            (pid for pid, _, name, _ in SERVICES
+             if wanted in (pid, name.lower(), pid.replace("swiggy_", ""))),
+            None,
+        )
+        if not match:
+            await update.message.reply_text(
+                f"I don't know \u201c{wanted}\u201d. Pick one:",
+                reply_markup=_service_keyboard(current),
+            )
+            return
+        await _apply_service(update.effective_chat.id, match, context)
+        await update.message.reply_text(
+            f"\u2705 Switched to <b>{_service_label(match)}</b>.", parse_mode="HTML"
+        )
+        return
+
+    await update.message.reply_text(
+        "\U0001F944 <b>What are we doing?</b>\n"
+        f"<i>Currently: {_service_label(current)}</i>\n\n"
+        "You can switch any time with /service.",
+        parse_mode="HTML",
+        reply_markup=_service_keyboard(current),
+    )
+
+
+async def _apply_service(chat_id: int, provider_id: str, context) -> None:
+    """Persist the choice locally, select it on the commerce side, and connect.
+
+    The first two are deliberate: the local copy survives a restart of the BFF,
+    the BFF's selection is what the agent loop reads, and storing only one
+    leaves them disagreeing after either process restarts -- the visible symptom
+    being groceries searched when the user asked for a table.
+
+    The connect is what makes switching work at all. Connection is tracked per
+    provider id, and Swiggy's three services are three ids, so `/connect swiggy`
+    left `swiggy_food` unconnected: choosing Food then failed with "Provider
+    'swiggy_food' is not connected", and the bot's advice for that error is
+    "try /connect swiggy" -- which the user had already done, and which would
+    not have helped if they did it again.
+
+    They all share one OAuth token, so this is a cached-token read rather than a
+    fresh login, and connect() is idempotent.
+    """
+    session.set_service(chat_id, provider_id)
+    await commerce.select(chat_id, provider_id)
+    await commerce.connect(chat_id, provider_id)
+
+
+# What each method actually costs the user at pay time. The third column is the
+# whole point of the picker: only one of these is genuinely hands-free, and a
+# user turning on auto-approve should be told which.
+PAYMENT_CHOICES = (
+    ("Cash", "", "\U0001F4B5", "Cash on delivery", "no payment step \u2014 fully automatic"),
+    ("UPI", "", "\U0001F4F1", "UPI app", "one approval in your UPI app, every order"),
+)
+
+
+@authorized
+async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Choose how orders get paid for. Usage: /pay [cash|upi]"""
+    chat_id = update.effective_chat.id
+    pref = session.get_payment_pref(chat_id)
+
+    if context.args:
+        wanted = context.args[0].strip().lower()
+        method = {"cash": "Cash", "cod": "Cash", "upi": "UPI"}.get(wanted)
+        if method:
+            session.set_payment_pref(chat_id, method)
+            await update.message.reply_text(_payment_summary(chat_id), parse_mode="HTML")
+            return
+
+    await update.message.reply_text(
+        _payment_summary(chat_id),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"{'\u2705 ' if pref['method'] == m else ''}{icon}  {label}",
+                callback_data=f"pay:{m}")]
+            for m, _, icon, label, _note in PAYMENT_CHOICES
+        ]),
+    )
+
+
+def _payment_summary(chat_id: int) -> str:
+    pref = session.get_payment_pref(chat_id)
+    current = next((c for c in PAYMENT_CHOICES if c[0] == pref["method"]), None)
+
+    head = (
+        f"\U0001F4B3 <b>Paying with: {current[3]}</b>\n<i>{current[4]}</i>"
+        if current else
+        "\U0001F4B3 <b>How should I pay?</b>\n<i>I'll ask each time until you pick one.</i>"
+    )
+    return (
+        f"{head}\n\n"
+        "<b>What Swiggy actually offers</b>\n"
+        "  \U0001F4B5  <b>Cash on delivery</b> \u2014 nothing to authorise\n"
+        "  \U0001F4F1  <b>UPI app</b> \u2014 I open it, you approve with your PIN\n"
+        "  \U0001F5A5  <b>Scan QR</b> \u2014 for desktop, same PIN step\n\n"
+        "<i>There is no card and no wallet on Swiggy's MCP \u2014 "
+        "<code>get_payment_options</code> returns UPI, QR and cash, nothing else. "
+        "And UPI cannot be authorised by a server: RBI requires two factors, one "
+        "of them dynamic, on every transaction. So cash on delivery is the only "
+        "combination that needs nothing from you at pay time.</i>"
+    )
+
+
+@authorized
+async def cmd_autopay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Turn auto-approve on or off. Usage: /autopay [amount|off]"""
+    chat_id = update.effective_chat.id
+
+    if not Config.COMMERCE_AUTOPAY_ENABLED:
+        await update.message.reply_text(
+            "\U0001F512 <b>Auto-approve is switched off on this machine.</b>\n\n"
+            "Set <code>COMMERCE_AUTOPAY_ENABLED=true</code> in <code>.env</code> "
+            "to allow it, then come back.",
+            parse_mode="HTML",
+        )
+        return
+
+    state = session.get_autopay(chat_id)
+    ceiling = Config.COMMERCE_AUTOPAY_MAX_RUPEES
+
+    if context.args:
+        raw = context.args[0].strip().lower()
+        if raw in ("off", "no", "stop", "disable"):
+            session.set_autopay(chat_id, enabled=False, limit_rupees=0)
+            await update.message.reply_text(
+                "\U0001F512 Auto-approve is <b>off</b>. I'll ask before every order.",
+                parse_mode="HTML",
+            )
+            return
+        digits = "".join(c for c in raw if c.isdigit())
+        if digits:
+            wanted = int(digits)
+            limit = min(wanted, ceiling)
+            session.set_autopay(chat_id, enabled=True, limit_rupees=limit)
+            clamp = (
+                f"\n\n<i>You asked for \u20b9{wanted:,} \u2014 capped to \u20b9{limit:,}, "
+                f"the ceiling set in .env.</i>" if wanted > limit else ""
+            )
+            await update.message.reply_text(
+                _autopay_summary(chat_id) + clamp, parse_mode="HTML"
+            )
+            return
+
+    await update.message.reply_text(
+        _autopay_summary(chat_id),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"\u20b9{n}", callback_data=f"autopay:{n}")
+             for n in (100, 250, 500) if n <= ceiling],
+            [InlineKeyboardButton("\U0001F512  Turn off", callback_data="autopay:0")],
+        ]),
+    )
+
+
+def _autopay_summary(chat_id: int) -> str:
+    state = session.get_autopay(chat_id)
+    daily = Config.COMMERCE_AUTOPAY_DAILY_RUPEES
+    left = session.autopay_remaining_today(chat_id, daily)
+
+    if not state["enabled"] or state["limit_rupees"] <= 0:
+        return (
+            "\U0001F512 <b>Auto-approve: off</b>\n"
+            "I ask before every order, showing the items and the total.\n\n"
+            "Pick a per-order limit to skip that tap for small ones:"
+        )
+    return (
+        "\u26A1 <b>Auto-approve: on</b>\n"
+        f"  \u2022 Up to <b>\u20b9{state['limit_rupees']:,}</b> per order\n"
+        f"  \u2022 <b>\u20b9{left:,}</b> of today's \u20b9{daily:,} left\n"
+        f"  \u2022 Anything larger still needs your tap\n\n"
+        "<i>This automates the approval, not the payment. Swiggy has no wallet "
+        "on MCP \u2014 UPI still opens your UPI app, and cash on delivery still "
+        "means cash at the door.</i>\n\n"
+        "<code>/autopay off</code> to stop."
+    )
+
+
+def _autopay_decision(chat_id: int, total_minor: int | None) -> tuple[bool, str]:
+    """Should this order skip the tap? Returns (auto_approve, message).
+
+    Fails closed at every uncertainty. In particular an unknown total is NOT
+    auto-approved: the manifests cannot yet confirm every provider's total
+    field, so a None here means "we could not read the price", and the one thing
+    that must never be automatic is spending an amount nobody could state.
+    """
+    if not Config.COMMERCE_AUTOPAY_ENABLED:
+        return False, ""
+
+    state = session.get_autopay(chat_id)
+    if not state["enabled"] or state["limit_rupees"] <= 0:
+        return False, ""
+
+    if total_minor is None:
+        return False, (
+            "\U0001F914 I could not read a total for this order, so I am asking "
+            "even though auto-approve is on."
+        )
+
+    rupees = int(total_minor) // 100
+    if rupees > state["limit_rupees"]:
+        return False, (
+            f"\u20b9{rupees:,} is over your \u20b9{state['limit_rupees']:,} "
+            "auto-approve limit, so this one needs your tap."
+        )
+
+    left = session.autopay_remaining_today(chat_id, Config.COMMERCE_AUTOPAY_DAILY_RUPEES)
+    if rupees > left:
+        return False, (
+            f"That would take today's auto-approved spend past \u20b9"
+            f"{Config.COMMERCE_AUTOPAY_DAILY_RUPEES:,} (\u20b9{left:,} left), "
+            "so this one needs your tap."
+        )
+
+    return True, (
+        "Payment itself is not automated: UPI still opens your UPI app, and "
+        "cash on delivery still means cash at the door."
+    )
+
+
 @authorized
 async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Capturing screenshot...")
@@ -1994,6 +2275,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = update.message.text
 
+    # Both of the branches below belong to the developer surface, and both
+    # swallow a plain message before it reaches the shopping agent -- the file
+    # picker eats any bare number, which in a shopping chat is far more likely
+    # to mean "2 packs" than "the second file". Their commands are unregistered
+    # in shopping mode, so neither state can be set; skipping them outright
+    # keeps that a design decision rather than a coincidence.
+    if not Config.SHOPPING_ONLY:
+        handled = await _handle_system_text_modes(update, context, text)
+        if handled:
+            return
+
+    await _run_agent_turn(update, context, text)
+
+
+async def _handle_system_text_modes(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> bool:
+    """Consume free text owed to a pending /find, /send or /nb prompt."""
     # Check if user is selecting from a numbered file list
     pending = context.chat_data.get("pending_files")
     if pending and text.strip().isdigit():
@@ -2009,10 +2308,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_document(
                         document=f, filename=Path(fpath).name
                     )
-            return
+            return True
         else:
             await update.message.reply_text(f"Pick a number between 1 and {len(pending)}.")
-            return
+            return True
 
     # Clear pending selection on any non-number message
     context.chat_data.pop("pending_files", None)
@@ -2024,9 +2323,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data.pop("nb_edit_cell", None)
         result = notebook_mgr.edit_cell(cell_idx, text)
         await update.message.reply_text(result)
-        return
+        return True
 
-    await _run_agent_turn(update, context, text)
+    return False
 
 
 # What Mimir says to the commerce agent on the user's behalf after they tap
@@ -2049,6 +2348,20 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
     spend money.
     """
     chat_id = update.effective_chat.id
+
+    # Ask once, before the first real turn. "Order me something" means three
+    # different things across groceries, restaurant delivery and a table
+    # booking, and guessing produces a confidently wrong first answer -- the
+    # worst kind, because the user has no reason yet to distrust it.
+    if session.get_service(chat_id) is None:
+        await update.message.reply_text(
+            "\U0001F44B <b>First things first \u2014 what are we doing?</b>\n\n"
+            "<i>I'll remember, and you can switch any time with /service.</i>",
+            parse_mode="HTML",
+            reply_markup=_service_keyboard(None),
+        )
+        return True
+
     await typing(update)
     thinking = await update.message.reply_text("\U0001F50E <i>Looking\u2026</i>", parse_mode="HTML")
 
@@ -2060,8 +2373,14 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
             pass
         error = data.get("error", "")
         if "not selected" in error or "not connected" in error:
+            # Name the service that is actually unconnected. The old text always
+            # said "/connect swiggy", which is the wrong advice whenever the
+            # selected service is Food or Dineout -- and reads as nonsense to
+            # someone who just logged in to Swiggy successfully.
+            selected = session.get_service(chat_id) or "swiggy"
             await update.message.reply_text(
-                f"{error}\n\nTry /connect swiggy first."
+                f"{error}\n\nTry <code>/connect {selected}</code> first.",
+                parse_mode="HTML",
             )
             return True
         return False  # fall through to Mimir's own agent
@@ -2084,6 +2403,14 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text(blocked)
         return True
 
+    # A commitment with no cart behind it -- Dineout's book_table -- cannot go
+    # through checkout_intent, which reads a cart that does not exist. Without
+    # this branch the loop blocks the call and nothing can ever approve it: safe,
+    # but the feature simply does not work.
+    action = data.get("blocked_action") or {}
+    if action.get("name") and action["name"] not in ("checkout", "place_food_order"):
+        return await _confirm_action(update, context, action)
+
     intent = await commerce.checkout_intent(chat_id)
     if not intent.get("ok"):
         await update.message.reply_text(f"Cannot check out: {intent.get('error')}")
@@ -2098,16 +2425,38 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # The provider's own docs require the delivery address be stated before
     # confirmation, and it is the detail a user is most likely to get wrong.
     details = f"{summary}{dry}"
-    approved = await guard.request_permission(
-        context.bot, chat_id, "commerce_checkout",
-        f"place order for {intent['total_display']}",
-        details,
-    )
+
+    auto_ok, auto_note = _autopay_decision(chat_id, intent.get("total_minor"))
+    if auto_ok:
+        # Auto-approved. The user still gets the full itemised bill -- an order
+        # that appears without any record of what was in it is indistinguishable
+        # from a bug, and they need to be able to spot a wrong one immediately.
+        await update.message.reply_text(
+            f"\u26A1 <b>Auto-approved</b> \u2014 under your \u20b9"
+            f"{session.get_autopay(chat_id)['limit_rupees']:,} limit.\n\n"
+            f"{details}\n\n<i>{auto_note}</i>\n"
+            "<code>/autopay off</code> to go back to approving each order.",
+            parse_mode="HTML",
+        )
+        approved = True
+    else:
+        if auto_note:
+            await update.message.reply_text(auto_note, parse_mode="HTML")
+        approved = await guard.request_permission(
+            context.bot, chat_id, "commerce_checkout",
+            f"place order for {intent['total_display']}",
+            details,
+        )
     if not approved:
         await update.message.reply_text(
             "\U0001F44D No problem \u2014 nothing ordered, nothing charged."
         )
         return True
+
+    if auto_ok:
+        # Recorded only once the approval actually stands, so a refused or
+        # failed order does not eat the day's allowance.
+        session.record_autopay_spend(chat_id, (intent.get("total_minor") or 0) // 100)
 
     # Re-run the turn with the money path armed, so the SAME agent that was
     # blocked completes the order. Routing the approval into the canonical
@@ -2127,6 +2476,65 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return True
     await reply_smart(update.message, data.get("reply") or "Order submitted.")
     return True
+
+
+async def _confirm_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: dict) -> bool:
+    """Approve one exact non-cart commitment, then let the agent complete it."""
+    chat_id = update.effective_chat.id
+    intent = await commerce.action_intent(chat_id, action["name"], action.get("args") or {})
+    if not intent.get("ok"):
+        await update.message.reply_text(
+            f"I can't confirm that: {intent.get('error')}"
+        )
+        return True
+
+    dry = (
+        "\n\n\u26A0\uFE0F <i>Dry run \u2014 nothing will actually be booked.</i>"
+        if intent.get("dry_run") else ""
+    )
+    # Deliberately NOT eligible for auto-approve. Auto-approve is bounded by a
+    # rupee limit, and a free booking has no amount to measure -- every ceiling
+    # that makes the feature safe reads zero here, so it would wave through an
+    # unlimited number of reservations. A booking is also uncancellable through
+    # the MCP, which is the opposite of the low-stakes case autopay is for.
+    approved = await guard.request_permission(
+        context.bot, chat_id, "commerce_booking",
+        _booking_headline(action),
+        f"{intent.get('summary', '')}{dry}",
+    )
+    if not approved:
+        await update.message.reply_text(
+            "\U0001F44D No problem \u2014 nothing booked."
+        )
+        return True
+
+    placing = await update.message.reply_text("\U0001F37D <i>Booking\u2026</i>", parse_mode="HTML")
+    result = await commerce.assistant_confirmed(chat_id, _CONFIRM_TEXT)
+    try:
+        await placing.delete()
+    except Exception:
+        pass
+
+    if not result.get("ok"):
+        await update.message.reply_text(f"Booking failed: {result.get('error')}")
+        return True
+    await reply_smart(update.message, result.get("reply") or "Booking submitted.")
+    return True
+
+
+def _booking_headline(action: dict) -> str:
+    args = action.get("args") or {}
+    if action["name"] == "book_table":
+        who = args.get("partySize") or args.get("guests") or args.get("covers")
+        when = args.get("slotTime") or args.get("time") or ""
+        where = args.get("restaurantName") or args.get("restaurant") or "the restaurant"
+        bits = [f"book a table at {where}"]
+        if when:
+            bits.append(f"at {when}")
+        if who:
+            bits.append(f"for {who}")
+        return " ".join(bits)
+    return f"run {action['name']}"
 
 
 async def _run_agent_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
@@ -2259,6 +2667,77 @@ async def _handle_message_regex(update: Update, context: ContextTypes.DEFAULT_TY
         await reply_smart(update.message, response or "No response.")
 
 
+# ── Voice handler (speak your order) ─────────────────────────────
+
+@authorized
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Transcribe a voice note and run it as if it had been typed.
+
+    The transcript is echoed back before anything acts on it. Speech recognition
+    is confident even when it is wrong, and on a shopping bot a misheard word is
+    a wrong item in a real cart -- the user has to be able to see what Mimir
+    thinks it heard, especially since Saaras auto-detects the language.
+
+    Note what this function does NOT do: it never inspects the text for consent.
+    A spoken "yes, order it" arrives here as ordinary text and goes to the same
+    agent turn a typed message would, where the money gate still waits for a tap
+    on an inline button. Approval is a callback_query -- a different Telegram
+    update type that neither a model nor a transcriber can produce -- and that is
+    precisely why a sentence cannot stand in for the tap.
+    """
+    note = update.message.voice
+    if not note:
+        return
+
+    if not voice.available():
+        await update.message.reply_text(
+            "\U0001F399 I can't hear voice notes yet \u2014 no SARVAM_API_KEY is set.\n"
+            "Type it instead and I'll get straight on it."
+        )
+        return
+
+    if voice.too_long(note.duration):
+        await update.message.reply_text(
+            f"\U0001F399 That's {note.duration}s \u2014 I can only hear up to "
+            f"{voice.MAX_SECONDS}s at a time.\n"
+            "Send a shorter note, or type it."
+        )
+        return
+
+    await typing(update)
+    thinking = await update.message.reply_text(
+        "\U0001F399 <i>Listening\u2026</i>", parse_mode="HTML"
+    )
+
+    try:
+        tg_file = await context.bot.get_file(note.file_id)
+        audio = bytes(await tg_file.download_as_bytearray())
+    except Exception as exc:
+        logger.exception("voice download failed")
+        await thinking.edit_text(f"Couldn't fetch that voice note: {type(exc).__name__}")
+        return
+
+    result = await voice.transcribe(
+        audio,
+        filename="speech.ogg",
+        content_type=note.mime_type or "audio/ogg",
+    )
+
+    if not result.ok:
+        await thinking.edit_text(
+            f"\U0001F399 I couldn't make that out \u2014 {result.error}.\n"
+            "Try again, or type it."
+        )
+        return
+
+    heard = f"\U0001F399 <i>Heard:</i> \u201c{html.escape(result.text)}\u201d"
+    if result.language:
+        heard += f"  <code>{html.escape(result.language)}</code>"
+    await thinking.edit_text(heard, parse_mode="HTML")
+
+    await _run_agent_turn(update, context, result.text)
+
+
 # ── Document handler (receive files from user) ───────────────────
 
 @authorized
@@ -2297,6 +2776,53 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Permission callbacks
     if query.data.startswith("perm:"):
         await guard.handle_callback(update, context)
+        return
+
+    # Service picker
+    if query.data.startswith("svc:"):
+        provider_id = query.data.split(":", 1)[1]
+        if provider_id not in _SERVICE_BY_ID:
+            await query.answer("Unknown service.")
+            return
+        await query.answer()
+        await _apply_service(update.effective_chat.id, provider_id, context)
+        _, icon, name, blurb = _SERVICE_BY_ID[provider_id]
+        await query.edit_message_text(
+            f"{icon} <b>{name}</b> \u2014 <i>{blurb}</i>\n\n"
+            f"{_service_prompt(provider_id)}\n\n"
+            "<i>Switch any time with /service.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Payment method picker
+    if query.data.startswith("pay:"):
+        method = query.data.split(":", 1)[1]
+        if method not in {m for m, *_ in PAYMENT_CHOICES}:
+            await query.answer("Unknown method.")
+            return
+        session.set_payment_pref(update.effective_chat.id, method)
+        await query.answer("Saved.")
+        await query.edit_message_text(
+            _payment_summary(update.effective_chat.id), parse_mode="HTML"
+        )
+        return
+
+    # Auto-approve picker
+    if query.data.startswith("autopay:"):
+        if not Config.COMMERCE_AUTOPAY_ENABLED:
+            await query.answer("Auto-approve is disabled on this machine.", show_alert=True)
+            return
+        try:
+            amount = int(query.data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Bad amount.")
+            return
+        chat_id = update.effective_chat.id
+        amount = min(amount, Config.COMMERCE_AUTOPAY_MAX_RUPEES)
+        session.set_autopay(chat_id, enabled=amount > 0, limit_rupees=amount)
+        await query.answer("Saved.")
+        await query.edit_message_text(_autopay_summary(chat_id), parse_mode="HTML")
         return
 
     # Fix callbacks
@@ -2355,57 +2881,76 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Bot initialization ────────────────────────────────────────────
 
+# The shopping surface: what Mimir is for, plus the few meta commands a
+# Telegram bot needs to be operable at all. /status earns its place the same
+# way the status *tool* does in tools_registry._SHOPPING_EXTRAS -- "are you
+# alive?" is a fair question mid-order -- and every persona in PERSONAS is a
+# shopping persona, so /persona is a tone dial on this surface, not a foreign
+# feature.
+_COMMERCE_COMMANDS = [
+    BotCommand("shop", "Shop in plain English"),
+    BotCommand("search", "Search the store"),
+    BotCommand("cart", "Show your cart"),
+    BotCommand("service", "Groceries, food or a table"),
+    BotCommand("autopay", "Auto-approve small orders"),
+    BotCommand("pay", "Cash or UPI"),
+    BotCommand("providers", "Which stores are set up"),
+    BotCommand("connect", "Log in to a store"),
+    BotCommand("start", "Start over"),
+    BotCommand("help", "What I can do"),
+    BotCommand("status", "Am I working?"),
+    BotCommand("persona", "Switch tone"),
+    BotCommand("stop", "Shut me down"),
+]
+
+# Developer tooling. Registered only under BOT_MODE=full -- see Config.BOT_MODE
+# for why these are gated rather than deleted.
+_SYSTEM_COMMANDS = [
+    BotCommand("ask", "Ask LLM"),
+    BotCommand("code", "Ask code model"),
+    BotCommand("run", "Run a Python script"),
+    BotCommand("read", "Read a file"),
+    BotCommand("write", "Write to a file"),
+    BotCommand("delete", "Delete a file"),
+    BotCommand("send", "Send a file to you"),
+    BotCommand("ls", "List directory"),
+    BotCommand("find", "Search for files"),
+    BotCommand("tree", "Show directory tree"),
+    BotCommand("recent", "Recently modified files"),
+    BotCommand("watch", "Run script with live output"),
+    BotCommand("cmd", "Run shell command"),
+    BotCommand("tail", "Monitor a log file"),
+    BotCommand("procs", "Show background processes"),
+    BotCommand("kill", "Kill background process"),
+    BotCommand("history", "Command history"),
+    BotCommand("nb", "Notebook commands"),
+    BotCommand("commit", "Git commit"),
+    BotCommand("diff", "Show git diff"),
+    BotCommand("gitlog", "Recent git commits"),
+    BotCommand("undo", "Undo last commit"),
+    BotCommand("screenshot", "Capture screen"),
+    BotCommand("models", "List Ollama models"),
+    BotCommand("logs", "View agent logs"),
+    BotCommand("apply", "Apply LLM-suggested fix"),
+    BotCommand("do", "Execute a complex task"),
+    BotCommand("open", f"Reveal in {host.FILE_MANAGER}"),
+    BotCommand("cd", "Change current folder"),
+    BotCommand("pwd", "Show current folder"),
+    BotCommand("clip", "Copy to clipboard"),
+    BotCommand("bookmark", "Save a bookmark"),
+    BotCommand("go", "Go to bookmark"),
+    BotCommand("gpu", "GPU status"),
+    BotCommand("livestream", "Stream desktop to Telegram"),
+    BotCommand("remote", "Remote desktop access link"),
+    BotCommand("remind", "Set a reminder"),
+]
+
+
 async def post_init(application: Application):
-    """Register bot commands menu and send startup notification."""
-    commands = [
-        BotCommand("start", "Start the agent"),
-        BotCommand("help", "Show all commands"),
-        BotCommand("ask", "Ask LLM"),
-        BotCommand("code", "Ask code model"),
-        BotCommand("run", "Run a Python script"),
-        BotCommand("read", "Read a file"),
-        BotCommand("write", "Write to a file"),
-        BotCommand("delete", "Delete a file"),
-        BotCommand("send", "Send a file to you"),
-        BotCommand("ls", "List directory"),
-        BotCommand("find", "Search for files"),
-        BotCommand("tree", "Show directory tree"),
-        BotCommand("recent", "Recently modified files"),
-        BotCommand("watch", "Run script with live output"),
-        BotCommand("cmd", "Run shell command"),
-        BotCommand("tail", "Monitor a log file"),
-        BotCommand("procs", "Show background processes"),
-        BotCommand("kill", "Kill background process"),
-        BotCommand("history", "Command history"),
-        BotCommand("nb", "Notebook commands"),
-        BotCommand("commit", "Git commit"),
-        BotCommand("diff", "Show git diff"),
-        BotCommand("gitlog", "Recent git commits"),
-        BotCommand("undo", "Undo last commit"),
-        BotCommand("screenshot", "Capture screen"),
-        BotCommand("status", "System status"),
-        BotCommand("models", "List Ollama models"),
-        BotCommand("logs", "View agent logs"),
-        BotCommand("apply", "Apply LLM-suggested fix"),
-        BotCommand("do", "Execute a complex task"),
-        BotCommand("open", f"Reveal in {host.FILE_MANAGER}"),
-        BotCommand("cd", "Change current folder"),
-        BotCommand("pwd", "Show current folder"),
-        BotCommand("clip", "Copy to clipboard"),
-        BotCommand("shop", "Shop in plain English"),
-        BotCommand("search", "Search the store"),
-        BotCommand("cart", "Show your cart"),
-        BotCommand("providers", "Which stores are set up"),
-        BotCommand("connect", "Log in to a store"),
-        BotCommand("bookmark", "Save a bookmark"),
-        BotCommand("go", "Go to bookmark"),
-        BotCommand("gpu", "GPU status"),
-        BotCommand("stop", "Shutdown MIMIR"),
-        BotCommand("livestream", "Stream desktop to Telegram"),
-        BotCommand("remote", "Remote desktop access link"),
-        BotCommand("persona", "Switch personality"),
-        BotCommand("remind", "Set a reminder"),
-    ]
+    """Register the command menu and send the startup notification."""
+    commands = list(_COMMERCE_COMMANDS)
+    if not Config.SHOPPING_ONLY:
+        commands += _SYSTEM_COMMANDS
     await application.bot.set_my_commands(commands)
 
     # ── Startup Dashboard ──
@@ -2433,7 +2978,7 @@ async def post_init(application: Application):
 
         dashboard = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "       R A V E N  v2.0\n"
+            "       M I M I R  v2.0\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "\n"
             f"  Time:    {now}\n"
@@ -2492,72 +3037,95 @@ def create_bot() -> Application:
         .build()
     )
 
-    # Command handlers — existing
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("ask", cmd_ask))
-    app.add_handler(CommandHandler("code", cmd_code))
-    app.add_handler(CommandHandler("read", cmd_read))
-    app.add_handler(CommandHandler("ls", cmd_ls))
-    app.add_handler(CommandHandler("write", cmd_write))
-    app.add_handler(CommandHandler("delete", cmd_delete))
-    app.add_handler(CommandHandler("send", cmd_send))
-    app.add_handler(CommandHandler("run", cmd_run))
-    app.add_handler(CommandHandler("do", cmd_do))
-    app.add_handler(CommandHandler("screenshot", cmd_screenshot))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("models", cmd_models))
-    app.add_handler(CommandHandler("logs", cmd_logs))
-    app.add_handler(CommandHandler("apply", cmd_apply))
-
-    # Command handlers — file discovery
-    app.add_handler(CommandHandler("find", cmd_find))
-    app.add_handler(CommandHandler("tree", cmd_tree))
-    app.add_handler(CommandHandler("recent", cmd_recent))
-
-    # Command handlers — process management
-    app.add_handler(CommandHandler("watch", cmd_watch))
-    app.add_handler(CommandHandler("tail", cmd_tail))
-    app.add_handler(CommandHandler("procs", cmd_procs))
-    app.add_handler(CommandHandler("kill", cmd_kill))
-    app.add_handler(CommandHandler("cmd", cmd_cmd))
-    app.add_handler(CommandHandler("history", cmd_history))
-
-    # Command handlers — notebook
-    app.add_handler(CommandHandler("nb", cmd_nb))
-
-    # Command handlers — git
-    app.add_handler(CommandHandler("commit", cmd_commit))
-    app.add_handler(CommandHandler("diff", cmd_diff))
-    app.add_handler(CommandHandler("gitlog", cmd_gitlog))
-    app.add_handler(CommandHandler("undo", cmd_undo))
-
-    # Command handlers — quality of life
-    app.add_handler(CommandHandler("open", cmd_open))
-    app.add_handler(CommandHandler("cd", cmd_cd))
-    app.add_handler(CommandHandler("pwd", cmd_pwd))
+    # Command handlers — shopping
     app.add_handler(CommandHandler("shop", cmd_shop))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("cart", cmd_cart))
     app.add_handler(CommandHandler("providers", cmd_providers))
     app.add_handler(CommandHandler("connect", cmd_connect))
-    app.add_handler(CommandHandler("clip", cmd_clip))
-    app.add_handler(CommandHandler("bookmark", cmd_bookmark))
-    app.add_handler(CommandHandler("go", cmd_go))
-    app.add_handler(CommandHandler("gpu", cmd_gpu))
-    app.add_handler(CommandHandler("stop", cmd_stop))
-    app.add_handler(CommandHandler("livestream", cmd_livestream))
-    app.add_handler(CommandHandler("remote", cmd_remote))
-    app.add_handler(CommandHandler("persona", cmd_persona))
-    app.add_handler(CommandHandler("remind", cmd_remind))
+    app.add_handler(CommandHandler("service", cmd_service))
+    app.add_handler(CommandHandler("autopay", cmd_autopay))
+    app.add_handler(CommandHandler("pay", cmd_pay))
 
-    # Inline button callback handler
+    # Command handlers — meta
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("persona", cmd_persona))
+    app.add_handler(CommandHandler("stop", cmd_stop))
+
+    if not Config.SHOPPING_ONLY:
+        # Command handlers — LLM
+        app.add_handler(CommandHandler("ask", cmd_ask))
+        app.add_handler(CommandHandler("code", cmd_code))
+        app.add_handler(CommandHandler("do", cmd_do))
+        app.add_handler(CommandHandler("apply", cmd_apply))
+
+        # Command handlers — files
+        app.add_handler(CommandHandler("read", cmd_read))
+        app.add_handler(CommandHandler("ls", cmd_ls))
+        app.add_handler(CommandHandler("write", cmd_write))
+        app.add_handler(CommandHandler("delete", cmd_delete))
+        app.add_handler(CommandHandler("send", cmd_send))
+
+        # Command handlers — file discovery
+        app.add_handler(CommandHandler("find", cmd_find))
+        app.add_handler(CommandHandler("tree", cmd_tree))
+        app.add_handler(CommandHandler("recent", cmd_recent))
+
+        # Command handlers — process management
+        app.add_handler(CommandHandler("run", cmd_run))
+        app.add_handler(CommandHandler("watch", cmd_watch))
+        app.add_handler(CommandHandler("tail", cmd_tail))
+        app.add_handler(CommandHandler("procs", cmd_procs))
+        app.add_handler(CommandHandler("kill", cmd_kill))
+        app.add_handler(CommandHandler("cmd", cmd_cmd))
+        app.add_handler(CommandHandler("history", cmd_history))
+
+        # Command handlers — notebook
+        app.add_handler(CommandHandler("nb", cmd_nb))
+
+        # Command handlers — git
+        app.add_handler(CommandHandler("commit", cmd_commit))
+        app.add_handler(CommandHandler("diff", cmd_diff))
+        app.add_handler(CommandHandler("gitlog", cmd_gitlog))
+        app.add_handler(CommandHandler("undo", cmd_undo))
+
+        # Command handlers — host
+        app.add_handler(CommandHandler("screenshot", cmd_screenshot))
+        app.add_handler(CommandHandler("models", cmd_models))
+        app.add_handler(CommandHandler("logs", cmd_logs))
+        app.add_handler(CommandHandler("gpu", cmd_gpu))
+        app.add_handler(CommandHandler("livestream", cmd_livestream))
+        app.add_handler(CommandHandler("remote", cmd_remote))
+
+        # Command handlers — quality of life
+        app.add_handler(CommandHandler("open", cmd_open))
+        app.add_handler(CommandHandler("cd", cmd_cd))
+        app.add_handler(CommandHandler("pwd", cmd_pwd))
+        app.add_handler(CommandHandler("clip", cmd_clip))
+        app.add_handler(CommandHandler("bookmark", cmd_bookmark))
+        app.add_handler(CommandHandler("go", cmd_go))
+        app.add_handler(CommandHandler("remind", cmd_remind))
+
+    # Inline button callback handler. Registered in both modes: the Approve /
+    # Cancel tap on an order is a callback_query, and it is the one thing on
+    # the money path that must always be able to land.
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     # Free text messages (must be after command handlers)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # File/document receiver
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    # Voice notes. Registered in both modes: speaking your order is part of the
+    # shopping surface, and the transcript re-enters through handle_message's
+    # own entry point, so it inherits whatever tools that mode allows.
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+
+    # File/document receiver. Saving whatever arrives into the workspace is a
+    # filesystem write with no part in shopping, so it goes with the rest of
+    # the developer surface. Receipts still travel outward via the send_file
+    # tool, which stays in _SHOPPING_EXTRAS.
+    if not Config.SHOPPING_ONLY:
+        app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     return app

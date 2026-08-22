@@ -91,7 +91,9 @@ class SwiggyAdapter:
                 open_swiggy_stream(access_token)
             )
             session = await stack.enter_async_context(
-                GuardedSwiggySession(read_stream, write_stream)
+                GuardedSwiggySession(
+                    read_stream, write_stream, dangerous_tools=self.dangerous_tools
+                )
             )
             await session.initialize()
         except BaseException:
@@ -145,7 +147,15 @@ class SwiggyAdapter:
         session = self._require_session()
 
         # DRY_RUN: never let a dangerous tool actually run, even if armed.
-        if _dry_run() and name in ("checkout", "confirm_order"):
+        #
+        # Reads self.dangerous_tools rather than a literal pair of names. The
+        # literal was Instamart's ("checkout", "confirm_order"), and a sibling
+        # service whose money tool is `place_food_order` or `book_table` would
+        # have sailed straight past it -- so a DRY_RUN that the operator
+        # believed was faking every spend would have placed a real order on the
+        # first Food checkout. Same failure as a shared DANGEROUS_TOOLS set,
+        # one layer down.
+        if _dry_run() and name in self.dangerous_tools:
             fake = {"status": "PLACED", "orderId": "DRYRUN-ORDER", "dryRun": True}
             return RawToolResult(text=json.dumps(fake), is_error=False, structured=fake)
 
@@ -160,8 +170,13 @@ class SwiggyAdapter:
         )
 
     def arm_dangerous(self) -> None:
-        """Arm the guard for exactly one dangerous-tool call (checkout/confirm_order)."""
-        GuardedSwiggySession.armed = True
+        """Arm this session's guard for exactly one dangerous-tool call.
+
+        Arms the instance, not the class. Arming the class also armed every
+        other connected Swiggy service in the process, so one approval unlocked
+        Instamart checkout, Food ordering and Dineout booking together.
+        """
+        self._require_session().armed = True
 
     # -------------------------------------------------------- canonical methods
     async def search(self, query: CanonicalSearchQuery) -> CanonicalSearchResult:

@@ -164,22 +164,53 @@ async def search(chat_id: int, query: str) -> str:
     in_stock = [i for i in items if i.get("available", True)]
     out_of_stock = [i for i in items if not i.get("available", True)]
 
-    lines = [f"\U0001F50D <b>{query}</b>", ""]
-    for item in in_stock[:8]:
-        unit = f" <i>({item['unit']})</i>" if item.get("unit") else ""
-        lines.append(f"<b>{item['price_display']}</b>  \u2014  {item['name']}{unit}")
-        lines.append(f"<code>{item['product_id']}</code>")
+    # "provider_id", not "provider" -- the BFF's /search returns the former, and
+    # the wrong key here fails silently: every service would quietly render with
+    # the generic style and nothing would ever look broken enough to notice.
+    return _format_results(query, in_stock, out_of_stock, data.get("provider_id"))
+
+
+# How each service labels its results, so a restaurant is not called a product
+# and a bookable table is not called stock.
+_RESULT_STYLE = {
+    "swiggy":         ("\U0001F6D2", "in stock",  "Say which one and how many."),
+    "swiggy_food":    ("\U0001F35B", "open now",  "Say which restaurant, or ask for its menu."),
+    "swiggy_dineout": ("\U0001F37D",  "bookable",  "Say which one, and when you'd like the table."),
+}
+
+
+def _format_results(query, in_stock, out_of_stock, provider_id=None) -> str:
+    icon, stock_word, hint = _RESULT_STYLE.get(
+        provider_id or "", ("\U0001F50D", "available", "Say which one you want.")
+    )
+
+    lines = [f"{icon} <b>{query}</b>", ""]
+
+    # Numbered, because the reply to a list is almost always "the second one"
+    # and a number is the shortest way for the model to be told which.
+    for n, item in enumerate(in_stock[:8], 1):
+        price = item.get("price_display") or ""
+        unit = item.get("unit") or ""
+        lines.append(f"<b>{n}.</b>  {item['name']}")
+        detail = "     "
+        if price:
+            detail += f"<b>{price}</b>"
+        if unit:
+            detail += f"   <i>{unit}</i>" if price else f"<i>{unit}</i>"
+        if detail.strip():
+            lines.append(detail)
         lines.append("")
 
     if out_of_stock:
-        lines.append(f"<i>\u2026and {len(out_of_stock)} out of stock</i>")
+        word = "out of stock" if stock_word == "in stock" else "unavailable"
+        lines.append(f"<i>\u2026and {len(out_of_stock)} {word}</i>")
         lines.append("")
 
     priced = [i["price_minor"] for i in in_stock if i.get("price_minor") is not None]
     if priced:
-        lines.append(f"\U0001F4B0 Cheapest in stock: <b>\u20B9{min(priced) / 100:.2f}</b>")
-    lines.append("")
-    lines.append("<i>Say which one you want and how many.</i>")
+        lines.append(f"\U0001F4B0 Cheapest {stock_word}: <b>\u20B9{min(priced) / 100:,.2f}</b>")
+        lines.append("")
+    lines.append(f"<i>{hint}</i>")
     return "\n".join(lines).rstrip()
 
 
@@ -199,16 +230,24 @@ def _format_cart(c: dict[str, Any]) -> str:
     lines = ["\U0001F6D2 <b>Your cart</b>", ""]
     for item in c["items"]:
         lines.append(f"  <b>{item['quantity']}\u00D7</b>  {item['name']}")
-        lines.append(f"       <i>{item['price_display']} each</i>")
+        lines.append(f"        <i>{item['price_display']} each</i>")
     lines.append("")
-    lines.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+    lines.append("<code>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</code>")
+
     # The store's own itemised bill, so the jump from basket to total is
-    # explained rather than just asserted.
-    for line in c.get("bill_lines") or []:
-        lines.append(f"{line['label']}   {line['value']}")
-    if not c.get("bill_lines") and c.get("subtotal_display") != c.get("total_display"):
-        lines.append(f"Subtotal   {c.get('subtotal_display', '')}")
-    lines.append(f"<b>To pay    {c.get('total_display', '\u2014')}</b>")
+    # explained rather than just asserted. Rendered in a <pre> block with the
+    # value right-aligned: on a phone the fees are the whole point of showing
+    # this, and a ragged left-aligned column is where the eye stops reading.
+    bill = list(c.get("bill_lines") or [])
+    if not bill and c.get("subtotal_display") != c.get("total_display"):
+        bill = [{"label": "Subtotal", "value": c.get("subtotal_display", "")}]
+
+    if bill:
+        width = max(len(str(b["label"])) for b in bill) + 2
+        rows = [f"{str(b['label']):<{width}}{str(b['value']):>9}" for b in bill]
+        lines.append("<pre>" + "\n".join(rows) + "</pre>")
+
+    lines.append(f"\U0001F4B3  <b>To pay    {c.get('total_display', '\u2014')}</b>")
     return "\n".join(lines)
 
 
@@ -281,6 +320,17 @@ async def reset_conversation(chat_id: int) -> str:
 
 
 # ── money path ───────────────────────────────────────────────────
+
+async def action_intent(chat_id: int, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Mint a confirmation for a commitment that has no cart behind it.
+
+    Dineout's book_table is the case this exists for: it commits the user to a
+    time, a table and a restaurant, and Swiggy's docs say a booking cannot be
+    cancelled through the MCP -- but there is no get_cart to snapshot, so
+    /checkout/intent has nothing to fingerprint.
+    """
+    return await _request("POST", "/action/intent", chat_id, {"name": name, "args": args})
+
 
 async def checkout_intent(chat_id: int) -> dict[str, Any]:
     """Snapshot the cart and mint a confirmation token. Spends nothing.

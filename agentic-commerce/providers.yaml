@@ -29,6 +29,41 @@ providers:
       # provider is described accurately; the client imposes its own ceiling.
       max_order_value: null
 
+  # Swiggy runs three MCP servers behind ONE OAuth identity. Same token, same
+  # auth base; only the URL and the tool names differ. Each is registered
+  # separately so its money-path tool set, capability flags and drift check are
+  # its own -- Food's spend tool is `place_food_order`, Dineout's is
+  # `book_table`, and neither is called `checkout`.
+  - id: swiggy_food
+    display_name: Swiggy Food
+    enabled: true
+    mcp_url: https://mcp.swiggy.com/food
+    auth_type: oauth2_pkce
+    adapter: backend.providers.swiggy.service_adapter:SwiggyFoodAdapter
+    manifest: backend.providers.swiggy.manifest_food
+    capability_flags:
+      searchable_without_auth: false
+      supports_cart: true
+      supports_checkout: true
+      requires_pre_confirmation: true
+      max_order_value: null
+
+  - id: swiggy_dineout
+    display_name: Swiggy Dineout
+    enabled: true
+    mcp_url: https://mcp.swiggy.com/dineout
+    auth_type: oauth2_pkce
+    adapter: backend.providers.swiggy.service_adapter:SwiggyDineoutAdapter
+    manifest: backend.providers.swiggy.manifest_dineout
+    capability_flags:
+      searchable_without_auth: false
+      # Dineout books tables. There is no delivery cart and no checkout in the
+      # ordering sense; book_table is still gated as a spend via DANGEROUS_TOOLS.
+      supports_cart: false
+      supports_checkout: false
+      requires_pre_confirmation: true
+      max_order_value: null
+
   - id: mock
     display_name: Mock Provider (pluggability proof)
     enabled: true
