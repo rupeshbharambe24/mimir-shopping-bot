@@ -24,9 +24,26 @@ echo "     the token lands on this machine and never leaves it."
 echo ""
 
 .venv/bin/python -c "
+import sys
 from dotenv import load_dotenv; load_dotenv()
+from backend.providers import oauth_pkce
 from backend.providers.swiggy import auth
-tok = auth.get_access_token()
+
+try:
+    tok = auth.get_access_token()
+except oauth_pkce.AuthServerError as exc:
+    print()
+    print('[!!]', exc)
+    if exc.is_provider_fault:
+        print()
+        print('     That is a fault on Swiggy\'s side, not a problem with this')
+        print('     machine or your account. Nothing here can fix it; retry later.')
+    sys.exit(1)
+except KeyboardInterrupt:
+    print()
+    print('[..] Cancelled. Nothing was saved.')
+    sys.exit(130)
+
 print()
 print('[OK] Logged in. Token cached at:', auth.token_file())
 print('     Access token length:', len(tok))

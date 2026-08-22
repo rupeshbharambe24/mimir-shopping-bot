@@ -30,6 +30,7 @@ import os
 import secrets
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -85,6 +86,84 @@ def make_pkce_pair() -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+
+class AuthServerError(RuntimeError):
+    """The provider's authorization server refused or failed.
+
+    Carries `status` and the server's own `body`, because that body is where
+    the actual reason lives and urllib throws it away by default: a bare
+    HTTPError renders as "HTTP Error 500: Internal Server Error" while the
+    response said, in full, `{"error":"server_error","message":"OOM command not
+    allowed when used memory > 'maxmemory'."}`. One of those tells you the
+    provider's Redis is full and there is nothing to fix on your side; the
+    other costs an afternoon.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None, body: str = ""):
+        super().__init__(message)
+        self.status = status
+        self.body = body
+
+    @property
+    def is_provider_fault(self) -> bool:
+        """5xx: their server broke. 4xx means our request was wrong."""
+        return self.status is not None and 500 <= self.status < 600
+
+
+def _post_json(url: str, payload: dict, *, what: str, timeout: float = 30.0) -> dict:
+    """POST JSON and return the parsed response, or raise AuthServerError.
+
+    Every OAuth call here goes through this so a failure reports what the
+    server actually said. The timeout is not optional either: these run
+    interactively behind a 180s browser wait, and urlopen's default of None
+    means a hung endpoint blocks the login forever with no output at all.
+    """
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace").strip()
+        except Exception:
+            pass
+        detail = ""
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                detail = str(parsed.get("message") or parsed.get("error_description")
+                             or parsed.get("error") or "").strip()
+        except ValueError:
+            detail = body[:300]
+        raise AuthServerError(
+            f"{what} failed: HTTP {exc.code}"
+            + (f" -- {detail}" if detail else ""),
+            status=exc.code,
+            body=body,
+        ) from None
+    except urllib.error.URLError as exc:
+        raise AuthServerError(f"{what} failed: cannot reach {url} ({exc.reason})") from None
+    except TimeoutError:
+        raise AuthServerError(f"{what} failed: {url} timed out after {timeout:.0f}s") from None
+
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise AuthServerError(
+            f"{what} failed: server returned a non-JSON body",
+            body=raw.decode("utf-8", "replace")[:300],
+        ) from None
+
+
+# --------------------------------------------------------------------------
 # Dynamic Client Registration (RFC 7591) -- run once, cache client_id
 # --------------------------------------------------------------------------
 
@@ -94,23 +173,23 @@ def get_client_id(cfg: OAuthConfig) -> str:
         with open(path) as f:
             return json.load(f)["client_id"]
 
-    payload = json.dumps({
-        "client_name": cfg.client_name,
-        "redirect_uris": [cfg.redirect_uri],
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",  # public client, PKCE-only
-    }).encode()
-
-    req = urllib.request.Request(
+    data = _post_json(
         f"{cfg.auth_base}/register",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        {
+            "client_name": cfg.client_name,
+            "redirect_uris": [cfg.redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",  # public client, PKCE-only
+        },
+        what=f"{cfg.display_name} client registration",
     )
-    with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read())
 
+    if "client_id" not in data:
+        raise AuthServerError(
+            f"{cfg.display_name} registration returned no client_id",
+            body=json.dumps(data)[:300],
+        )
     client_id = data["client_id"]
     with open(path, "w") as f:
         json.dump({"client_id": client_id}, f)
@@ -192,39 +271,31 @@ def run_authorize_flow(cfg: OAuthConfig) -> dict:
 
 
 def exchange_code_for_token(cfg: OAuthConfig, code: str, verifier: str, client_id: str) -> dict:
-    payload = json.dumps({
-        "grant_type": "authorization_code",
-        "code": code,
-        "code_verifier": verifier,
-        "redirect_uri": cfg.redirect_uri,
-        "client_id": client_id,
-    }).encode()
-    req = urllib.request.Request(
+    token = _post_json(
         f"{cfg.auth_base}/token",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": cfg.redirect_uri,
+            "client_id": client_id,
+        },
+        what=f"{cfg.display_name} token exchange",
     )
-    with urllib.request.urlopen(req) as resp:
-        token = json.loads(resp.read())
     token["obtained_at"] = int(time.time())
     return token
 
 
 def refresh_token(cfg: OAuthConfig, refresh_tok: str, client_id: str) -> dict:
-    payload = json.dumps({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_tok,
-        "client_id": client_id,
-    }).encode()
-    req = urllib.request.Request(
+    token = _post_json(
         f"{cfg.auth_base}/token",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_tok,
+            "client_id": client_id,
+        },
+        what=f"{cfg.display_name} token refresh",
     )
-    with urllib.request.urlopen(req) as resp:
-        token = json.loads(resp.read())
     token["obtained_at"] = int(time.time())
     return token
 
