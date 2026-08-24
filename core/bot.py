@@ -2383,7 +2383,33 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 parse_mode="HTML",
             )
             return True
-        return False  # fall through to Mimir's own agent
+
+        # Everything else: say so, and STOP.
+        #
+        # This used to `return False`, handing the turn to Mimir's own tool loop
+        # as a "graceful" fallback. It was the opposite of graceful. That loop
+        # has no share of the commerce agent's conversation, so it re-ran
+        # commerce_providers and commerce_search from scratch every turn and
+        # asked "which product?" to a user who had just named one -- 225 times
+        # in one session. When its own cascade then ran out (Groq is 8000
+        # tokens/minute), it invented a cart, quoted "$1.99" and "Cart total:
+        # $6.97" for rupee-priced Indian groceries, and when challenged
+        # explained that dollars were "the store's default display" and would
+        # "be converted at checkout". None of that was true.
+        #
+        # A shopping assistant that cannot reach the store must say so. Falling
+        # back to a model that will confidently make up prices is worse than
+        # returning nothing, because the user cannot tell the difference.
+        logger.error(f"Commerce agent unavailable, not falling back: {error}")
+        await update.message.reply_text(
+            "\U0001F6D2 I can't reach the store right now, so I'm not going to "
+            "guess.\n\n"
+            f"<code>{html.escape(error[:250])}</code>\n\n"
+            "Your cart is untouched. Try again in a moment \u2014 "
+            "<code>/cart</code> still works and shows the real contents.",
+            parse_mode="HTML",
+        )
+        return True
 
     if not data.get("blocked_on_confirmation"):
         try:

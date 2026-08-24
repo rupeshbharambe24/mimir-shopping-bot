@@ -111,3 +111,51 @@ def test_the_preference_persists_and_starts_unset():
     assert session.get_payment_pref(CHAT)["method"] == ""
     session.set_payment_pref(CHAT, "Cash")
     assert session.get_payment_pref(CHAT)["method"] == "Cash"
+
+
+# ── never fall back to a model that cannot reach the store ───────────
+
+def test_a_commerce_failure_does_not_hand_the_turn_to_mimirs_own_model():
+    """The defect that made Mimir quote dollars for Indian groceries.
+
+    _run_commerce_turn used to `return False` on any error it did not
+    recognise, handing the turn to Mimir's own tool loop as a "graceful"
+    fallback. That loop shares none of the commerce agent's conversation, so it
+    re-ran commerce_providers and commerce_search from scratch every turn and
+    asked "which product?" to a user who had just named one. When its own
+    cascade ran dry it invented a cart and priced it in US dollars, then
+    explained the dollars away as "the store's default display".
+
+    A shopping assistant that cannot reach the store has to say so. Falling
+    back to a model that will confidently make up prices is worse than
+    returning nothing, because the user cannot tell which one they got.
+    """
+    import inspect
+
+    from core import bot
+
+    src = inspect.getsource(bot._run_commerce_turn)
+    body = src.split("data = await commerce.assistant", 1)[1]
+    # Strip comments: the fix documents the old `return False` in prose, and a
+    # naive substring match would find the explanation rather than the code.
+    code = "\n".join(
+        line for line in body.splitlines() if not line.strip().startswith("#")
+    )
+
+    assert "return False" not in code, (
+        "_run_commerce_turn still falls through to Mimir's own agent on a "
+        "commerce failure; that path fabricates prices"
+    )
+    assert "can't reach the store" in body, "the user is not told the store is unreachable"
+    assert "cart is untouched" in body.lower() or "untouched" in body
+
+
+def test_the_unreachable_message_shows_the_real_error():
+    """Surfacing the provider's own error is what turned a week of confusion
+    into a five-minute diagnosis, the same lesson as AuthServerError."""
+    import inspect
+
+    from core import bot
+
+    src = inspect.getsource(bot._run_commerce_turn)
+    assert "html.escape(error" in src, "the underlying error is not shown to the user"

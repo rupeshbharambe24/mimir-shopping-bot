@@ -11,6 +11,60 @@ wrong account.
 
 ---
 
+## 2026-08-24 (latest) — Mimir was inventing prices in dollars
+
+Reported as "it forgets things and cannot add to cart". The screenshots showed
+worse: a cart the user never built, prices quoted as "$1.99" and "Cart total:
+$6.97" for rupee-priced Indian groceries, and — when challenged — a fluent
+explanation that dollars were "the store's default display" and would "be
+converted to rupees at checkout". None of it was true.
+
+**Root cause.** Swiggy added `create_address` and `delete_address` to a running
+Instamart server. `Session.gemini_tools` caches the converted declarations once
+per session, on the documented assumption that "the declarations never change
+within a connection". They changed. The cached set then contained an array
+property with no `items`, which Gemini rejects outright:
+
+    400 INVALID_ARGUMENT ... function_declarations[2]
+    .parameters.properties[lines].items: missing field
+
+Every commerce turn 400'd, for days, with no way to rebuild the cache.
+
+**What turned a bug into a liar.** `_run_commerce_turn` returned False on any
+error it did not recognise, handing the turn to Mimir's own tool loop as a
+graceful fallback. That loop shares none of the commerce agent's conversation,
+so it re-ran `commerce_providers` and `commerce_search` from scratch every turn
+— 225 times in one session — and asked "which product?" to a user who had just
+named one. That is the "forgetting". When its own cascade ran dry (Groq is
+8,000 tokens/minute; 24 rate-limit hits, then a Gemini timeout, then Ollama
+refused) it fell to the regex classifier and to inventing answers.
+
+Three fixes, each closing a different link in that chain:
+
+- **`sanitize_json_schema`** fills in a permissive `items` for any bare array
+  before conversion, and a tool whose schema still will not convert is skipped
+  with a warning rather than taking every other tool down with it. A provider is
+  entitled to publish `{"type": "array"}`; that should cost one tool, not the
+  assistant.
+- **The tool cache rebuilds.** A turn failing with a declaration error clears
+  `gemini_tools`, rebuilds and retries once. A cache that can never be rebuilt
+  turns one upstream edit into a permanently dead session.
+- **No more silent fallback.** A commerce failure now says so, shows the
+  provider's own error, and states the cart is untouched. Falling back to a
+  model that cannot reach the store is worse than returning nothing, because
+  the user cannot tell which one answered.
+
+Also: the sidecar had been running since Thursday, three days behind the code —
+no `/action/intent`, no Food, no Dineout. Restarted; `/health` now lists all
+four providers.
+
+Verified against the live account: search → "add the 58g one, 1 pack" →
+`update_cart` fires and the item persists. No re-asking, real rupees.
+
+18 new tests.
+
+---
+
 ## 2026-08-22 — the wrong venv now says so, and Food grew two tools
 
 Running `python3 main.py` from the agentic-commerce venv produced a bare

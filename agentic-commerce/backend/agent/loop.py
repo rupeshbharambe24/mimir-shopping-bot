@@ -18,12 +18,15 @@ only tool names, schemas, and results do (unchanged from the original design).
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 from google import genai
 from google.genai import types as genai_types
 
 from backend.providers.base import ProviderAdapter
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
@@ -52,18 +55,63 @@ Rules:
 """
 
 
+def sanitize_json_schema(node):
+    """Make a provider's JSON Schema acceptable to Gemini.
+
+    Gemini rejects the WHOLE request -- not the one bad declaration -- if any
+    array-typed property omits `items`:
+
+        400 INVALID_ARGUMENT ... function_declarations[2].parameters
+        .properties[lines].items: missing field.
+
+    A provider is free to publish `{"type": "array"}` with no `items`; it is
+    valid JSON Schema and means "an array of anything". Gemini disagrees, and
+    the cost of that disagreement is total: every turn 400s, so the commerce
+    agent never runs at all. One provider tightening or loosening a schema
+    should not be able to take the whole assistant down, so bare arrays get an
+    explicit permissive `items` rather than being passed through.
+
+    Returns a new structure; the provider's own schema is left untouched.
+    """
+    if isinstance(node, list):
+        return [sanitize_json_schema(v) for v in node]
+    if not isinstance(node, dict):
+        return node
+
+    out = {k: sanitize_json_schema(v) for k, v in node.items()}
+
+    declared = out.get("type")
+    types = declared if isinstance(declared, list) else [declared]
+    if "array" in types and "items" not in out:
+        # Permissive rather than guessed. Inventing a concrete element type
+        # would make the model confidently send the wrong shape.
+        out["items"] = {"type": "string"}
+    return out
+
+
 async def build_gemini_tools(adapter: ProviderAdapter) -> list:
     """Translate the selected provider's raw MCP tools into plain Gemini
     function declarations (no live objects to deep-copy)."""
     raw_tools = await adapter.list_raw_tools()
     decls = []
     for t in raw_tools:
+        schema = sanitize_json_schema(t.input_schema or {})
+        try:
+            parameters = genai_types.Schema.from_json_schema(
+                json_schema=genai_types.JSONSchema(**schema)
+            )
+        except Exception as exc:
+            # Skip the one tool rather than lose every tool. A missing tool
+            # degrades the assistant; an unconvertible one kills it outright.
+            logger.warning(
+                "Skipping tool %r: its schema will not convert (%s: %s)",
+                t.name, type(exc).__name__, exc,
+            )
+            continue
         decls.append({
             "name": t.name,
             "description": t.description or "",
-            "parameters": genai_types.Schema.from_json_schema(
-                json_schema=genai_types.JSONSchema(**(t.input_schema or {}))
-            ),
+            "parameters": parameters,
         })
     return [genai_types.Tool(function_declarations=decls)]
 

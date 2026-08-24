@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import secrets
 import time
@@ -27,6 +28,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 from backend.canonical.types import (
     CanonicalCart,
@@ -705,6 +708,21 @@ class AgentMessage(BaseModel):
     armed: bool = False
 
 
+# Gemini rejects the whole request, naming a function declaration, when the
+# cached tool schema no longer matches what it will accept. Matched on text
+# because the SDK raises a generic ClientError for it.
+_STALE_TOOL_MARKERS = (
+    "function_declarations",
+    "INVALID_ARGUMENT",
+    "missing field",
+)
+
+
+def _looks_like_stale_tools(exc: Exception) -> bool:
+    blob = f"{type(exc).__name__}: {exc}"
+    return any(marker in blob for marker in _STALE_TOOL_MARKERS)
+
+
 @app.post("/agent/message")
 async def agent_message(body: AgentMessage, request: Request, response: Response):
     s = _get_session(request, response)
@@ -737,7 +755,26 @@ async def agent_message(body: AgentMessage, request: Request, response: Response
             body.text, armed=body.armed, emit=emit,
         )
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        # The tool declarations are cached for the life of the session, on the
+        # assumption that a provider's tools do not change under a live
+        # connection. Swiggy disproved that: they added create_address and
+        # delete_address to a running server, the cached declarations went
+        # stale, and Gemini answered 400 INVALID_ARGUMENT to every single turn
+        # for days. A cache that can never be rebuilt turns one upstream change
+        # into a permanently dead session.
+        if _looks_like_stale_tools(e):
+            logger.warning("Rebuilding tool declarations after: %s", e)
+            s.gemini_tools = None
+            try:
+                s.gemini_tools = await agent_loop.build_gemini_tools(adapter)
+                reply = await agent_loop.run_turn(
+                    s.genai_client, adapter, s.gemini_tools, s.history,
+                    body.text, armed=body.armed, emit=emit,
+                )
+            except Exception as retry_exc:
+                return {"ok": False, "error": f"{type(retry_exc).__name__}: {retry_exc}"}
+        else:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     # Did the loop refuse a money-path tool for want of confirmation? The caller
     # owns the confirmation UI, so it needs to know to ask.
