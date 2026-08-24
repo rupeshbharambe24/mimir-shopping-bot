@@ -146,16 +146,55 @@ def test_a_commerce_failure_does_not_hand_the_turn_to_mimirs_own_model():
         "_run_commerce_turn still falls through to Mimir's own agent on a "
         "commerce failure; that path fabricates prices"
     )
-    assert "can't reach the store" in body, "the user is not told the store is unreachable"
-    assert "cart is untouched" in body.lower() or "untouched" in body
+    # The wording itself lives in _friendly_outage now; what matters here is
+    # that this path tells the user something instead of silently handing the
+    # turn to a model that cannot reach the store.
+    assert "_friendly_outage" in body, "the user is not told anything"
+    assert "cart is safe" in bot._friendly_outage("503 UNAVAILABLE")
 
 
-def test_the_unreachable_message_shows_the_real_error():
-    """Surfacing the provider's own error is what turned a week of confusion
-    into a five-minute diagnosis, the same lesson as AuthServerError."""
+def test_the_raw_error_goes_to_the_log_and_never_to_the_chat():
+    """Surfacing the provider's own error was right for the login scripts,
+    where the reader is the operator. Here the reader is a customer, and
+
+        ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message':
+        'This model is currently experiencing high demand...'}}
+
+    landed in the middle of a checkout. It is unreadable, it is frightening
+    next to a payment step, and "model" is a word about our infrastructure
+    that means nothing to someone buying biscuits.
+    """
     import inspect
 
     from core import bot
 
     src = inspect.getsource(bot._run_commerce_turn)
-    assert "html.escape(error" in src, "the underlying error is not shown to the user"
+    assert "logger.error" in src, "the real error must still reach the log"
+    assert "html.escape(error" not in src, "raw provider errors are shown to the user"
+    assert "_friendly_outage" in src
+
+
+def test_every_outage_message_says_nothing_was_charged():
+    """At a payment step, an unexplained failure reads as "did that go
+    through?" -- so every path must answer that first."""
+    from core import bot
+
+    errors = [
+        "ServerError: 503 UNAVAILABLE. This model is experiencing high demand",
+        "ClientError: 429 RESOURCE_EXHAUSTED",
+        "Commerce service is not running at http://127.0.0.1:8011",
+        "KeyError: something nobody anticipated",
+    ]
+    for e in errors:
+        msg = bot._friendly_outage(e)
+        assert "cart is safe" in msg, e
+        assert "{" not in msg and "'code'" not in msg, f"raw payload leaked: {e}"
+        assert "model" not in msg.lower(), f"infrastructure jargon leaked: {e}"
+
+
+def test_a_busy_model_is_described_as_busy_not_as_broken():
+    from core import bot
+
+    msg = bot._friendly_outage("503 UNAVAILABLE high demand")
+    assert "overloaded" in msg.lower() or "busy" in msg.lower()
+    assert "few seconds" in msg.lower()

@@ -11,6 +11,49 @@ wrong account.
 
 ---
 
+## 2026-08-24 (latest) — a 503 mid-checkout, in developer language
+
+A shopper tapped PhonePe and got this, in the middle of paying:
+
+    ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This
+    model is currently experiencing high demand. Spikes in demand are usually
+    temporary. Please try again later.', 'status': 'UNAVAILABLE'}}
+
+Two separate failures.
+
+**The 503 should never have reached the user at all.** Failover only matched
+429/RESOURCE_EXHAUSTED/quota -- our own limit. A 503 is THEIR capacity, and it
+is the case failover helps most: one model being busy says nothing about
+another. It was the single failure mode that did not trigger it. Now `503`,
+`UNAVAILABLE`, `OVERLOADED`, `500` and deadline errors all fail over, and after
+exhausting every model the whole set is retried once after a short pause,
+because Google's own message says spikes "are usually temporary". `400
+INVALID_ARGUMENT` is still excluded -- it fails identically everywhere, so
+retrying it burns every quota instead of one.
+
+**And the raw error should never be shown to a shopper.** Surfacing the
+provider's own words was right for `login-*.sh`, where the reader is the
+operator debugging their own machine. Here the reader is someone buying
+biscuits: the payload is unreadable, it is frightening next to a payment step,
+and "model" is a word about our infrastructure that means nothing to them.
+
+`_friendly_outage` now maps a failure to one of four plain messages, and every
+one of them opens with the two facts that matter mid-checkout:
+
+    I'm a bit overloaded right now.
+    Nothing was charged and your cart is safe.
+
+    Give me a few seconds and send that again.
+
+The full error still goes to the log, where the operator can find it. Tests
+assert that no message can leak a raw payload or the word "model", and that
+every path says nothing was charged -- an unexplained failure at a payment step
+otherwise reads as "did that go through?"
+
+8 new tests.
+
+---
+
 ## 2026-08-24 (later) — why GROQ_API_KEY was never the backup
 
 Reported as "Gemini limit hit, that's why I put the backup Groq, why is it not

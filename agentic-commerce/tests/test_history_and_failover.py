@@ -161,3 +161,49 @@ def test_fallback_models_are_distinct_from_the_primary():
     ]
     assert len(models) >= 2
     assert len(set(models)) == len(models)
+
+
+# ── 503 is the case failover helps most ──────────────────────────────
+
+@pytest.mark.parametrize("msg", [
+    "ServerError: 503 UNAVAILABLE. This model is currently experiencing high demand",
+    "503 UNAVAILABLE",
+    "The model is overloaded",
+    "500 INTERNAL",
+    "DEADLINE_EXCEEDED",
+])
+def test_their_capacity_problems_are_failover_worthy(msg):
+    """A 503 says one model is busy. It says nothing about another -- and it
+    was the one failure that did NOT trigger failover, so a checkout died at
+    the payment step instead of moving to a model with capacity."""
+    assert loop._is_transient(Exception(msg)) is True
+
+
+@pytest.mark.parametrize("msg", [
+    "400 INVALID_ARGUMENT: missing field",
+    "ClientError: 400 Bad Request",
+])
+def test_our_own_bad_requests_are_still_not_retried(msg):
+    """These fail identically on every model; retrying burns every quota."""
+    assert loop._is_transient(Exception(msg)) is False
+
+
+async def test_a_503_on_every_model_is_retried_once_after_a_pause(monkeypatch):
+    """Google's own 503 says spikes 'are usually temporary'. Losing a checkout
+    because every model was busy for two seconds is a bad reason to lose it."""
+    monkeypatch.setattr(loop, "RETRY_PAUSE_S", 0)
+    calls = []
+
+    class FakeModels:
+        async def generate_content(self, *, model, contents, config):
+            calls.append(model)
+            if len(calls) <= len(loop.MODEL_FALLBACKS) + 1:
+                raise Exception("503 UNAVAILABLE high demand")
+            return "recovered"
+
+    class FakeClient:
+        aio = type("aio", (), {"models": FakeModels()})()
+
+    out = await loop._generate_with_failover(FakeClient(), contents=[], config=None)
+    assert out == "recovered"
+    assert len(calls) > len(loop.MODEL_FALLBACKS) + 1, "no second pass happened"

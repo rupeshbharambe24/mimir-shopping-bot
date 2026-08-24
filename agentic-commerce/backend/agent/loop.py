@@ -17,6 +17,7 @@ only tool names, schemas, and results do (unchanged from the original design).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -43,6 +44,9 @@ DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 # calling dialect, and converting mid-order is a change to the loop that drives
 # the money path. Same-SDK failover first, because it is the change that cannot
 # introduce a new class of bug.
+# How long to wait before the second pass over all models.
+RETRY_PAUSE_S = float(os.environ.get("AGENT_RETRY_PAUSE_S", "2"))
+
 MODEL_FALLBACKS = [
     m.strip() for m in os.environ.get(
         "GEMINI_MODEL_FALLBACKS", "gemini-flash-latest,gemini-2.5-flash"
@@ -50,9 +54,37 @@ MODEL_FALLBACKS = [
 ]
 
 
-def _is_rate_limited(exc: Exception) -> bool:
-    blob = f"{type(exc).__name__}: {exc}"
-    return "429" in blob or "RESOURCE_EXHAUSTED" in blob or "quota" in blob.lower()
+# Failures worth trying another model for. Two distinct kinds, and only
+# matching the first is what let a checkout die mid-payment:
+#
+#   429 RESOURCE_EXHAUSTED  -- our quota, per model, so a sibling has its own
+#   503 UNAVAILABLE         -- THEIR capacity: "This model is currently
+#                              experiencing high demand. Spikes in demand are
+#                              usually temporary."
+#
+# A 503 is the case failover helps most -- one model being busy says nothing
+# about another -- and it was the one case that did not trigger it.
+_TRANSIENT_MARKERS = (
+    "429", "RESOURCE_EXHAUSTED", "QUOTA",
+    "503", "UNAVAILABLE", "OVERLOADED", "HIGH DEMAND",
+    "500", "INTERNAL", "DEADLINE", "TIMEOUT",
+)
+
+
+def _is_transient(exc: Exception) -> bool:
+    """True for failures that another model, or another moment, may survive.
+
+    Deliberately excludes 400 INVALID_ARGUMENT: a malformed request fails
+    identically everywhere, so retrying it burns every quota instead of one.
+    """
+    blob = f"{type(exc).__name__}: {exc}".upper()
+    if "INVALID_ARGUMENT" in blob or "400" in blob:
+        return False
+    return any(marker in blob for marker in _TRANSIENT_MARKERS)
+
+
+# Backwards-compatible alias; the old name only ever meant "429".
+_is_rate_limited = _is_transient
 
 
 async def _generate_with_failover(client, *, contents, config, emit=None):
@@ -65,18 +97,27 @@ async def _generate_with_failover(client, *, contents, config, emit=None):
     models = [DEFAULT_MODEL] + [m for m in MODEL_FALLBACKS if m != DEFAULT_MODEL]
     last: Exception | None = None
 
-    for name in models:
-        try:
-            return await client.aio.models.generate_content(
-                model=name, contents=contents, config=config
-            )
-        except Exception as exc:
-            if not _is_rate_limited(exc):
-                raise
-            last = exc
-            logger.warning("Model %s rate-limited; trying the next one", name)
-            if emit is not None:
-                await emit({"type": "model_failover", "from": name})
+    # One extra pass over the same models after a short pause. Google's own 503
+    # says spikes "are usually temporary", and a checkout dying because every
+    # model happened to be busy for two seconds is a bad reason to lose a sale.
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(RETRY_PAUSE_S)
+        for name in models:
+            try:
+                return await client.aio.models.generate_content(
+                    model=name, contents=contents, config=config
+                )
+            except Exception as exc:
+                if not _is_transient(exc):
+                    raise
+                last = exc
+                logger.warning(
+                    "Model %s unavailable (%s); trying the next one",
+                    name, str(exc)[:120],
+                )
+                if emit is not None:
+                    await emit({"type": "model_failover", "from": name})
 
     raise last if last else RuntimeError("no model available")
 

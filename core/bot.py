@@ -2401,14 +2401,7 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # back to a model that will confidently make up prices is worse than
         # returning nothing, because the user cannot tell the difference.
         logger.error(f"Commerce agent unavailable, not falling back: {error}")
-        await update.message.reply_text(
-            "\U0001F6D2 I can't reach the store right now, so I'm not going to "
-            "guess.\n\n"
-            f"<code>{html.escape(error[:250])}</code>\n\n"
-            "Your cart is untouched. Try again in a moment \u2014 "
-            "<code>/cart</code> still works and shows the real contents.",
-            parse_mode="HTML",
-        )
+        await update.message.reply_text(_friendly_outage(error), parse_mode="HTML")
         return True
 
     if not data.get("blocked_on_confirmation"):
@@ -2502,6 +2495,56 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return True
     await reply_smart(update.message, data.get("reply") or "Order submitted.")
     return True
+
+
+# What a shopper should read when the assistant cannot reach the store.
+#
+# The full error goes to the log, never to the chat. Dumping
+# "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model
+# is currently experiencing high demand...'}}" into a checkout is worse than
+# useless: it is unreadable, it is frightening next to a payment step, and
+# "model" is a word about our infrastructure that means nothing to someone
+# buying biscuits. Surfacing the raw error was right for the LOGIN scripts,
+# where the reader is the operator. Here the reader is a customer.
+_OUTAGE_MESSAGES = (
+    (("429", "resource_exhausted", "quota", "503", "unavailable",
+      "high demand", "overloaded", "timeout", "deadline"),
+     "\U0001F634 <b>I'm a bit overloaded right now.</b>\n"
+     "Nothing was charged and your cart is safe.\n\n"
+     "Give me a few seconds and send that again."),
+
+    (("not connected", "not selected"),
+     "\U0001F510 <b>I'm not signed in to the store.</b>\n"
+     "Your cart is safe.\n\n"
+     "Send /providers to see what's connected."),
+
+    (("connect", "connection", "unreachable", "refused",
+      "not running", "timed out", "non-json"),
+     "\U0001F50C <b>I can't reach the store right now.</b>\n"
+     "Nothing was charged and your cart is safe.\n\n"
+     "Try again in a moment."),
+)
+
+_OUTAGE_DEFAULT = (
+    "\U0001F6D2 <b>Something went wrong on my side.</b>\n"
+    "Nothing was charged and your cart is safe.\n\n"
+    "Try again in a moment \u2014 /cart shows what's really in there."
+)
+
+
+def _friendly_outage(error: str) -> str:
+    """Translate a provider or model failure into something a shopper can act on.
+
+    Always says the same two things first: nothing was charged, and the cart is
+    intact. During a checkout those are the only facts the person actually
+    needs, and an unexplained failure at the payment step otherwise reads as
+    "did that go through?"
+    """
+    lowered = (error or "").lower()
+    for markers, message in _OUTAGE_MESSAGES:
+        if any(m in lowered for m in markers):
+            return message
+    return _OUTAGE_DEFAULT
 
 
 async def _confirm_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: dict) -> bool:
