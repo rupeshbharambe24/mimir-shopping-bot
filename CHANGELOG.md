@@ -11,7 +11,48 @@ wrong account.
 
 ---
 
-## 2026-08-24 (latest) — a 503 mid-checkout, in developer language
+## 2026-08-24 (latest) — the bot now picks its own session back up
+
+Mid-conversation, in the chat:
+
+    No provider selected. POST /providers/{id}/select first.
+
+That is an instruction to a developer holding an HTTP client, shown to someone
+buying biscuits — and it told a user who had already connected to go and
+connect.
+
+**Why it happened.** The commerce service keeps sessions in memory
+(`_SESSIONS`, documented as "fine for a single-instance demo"). Restarting it —
+which shipping the last three fixes required — wipes the selected provider and
+the connected set. The bot, meanwhile, still has the choice on disk in
+`core/session.py`. Neither side was wrong; nothing re-synced them, and only the
+user noticed.
+
+A user who connected once should not have to do it again because a process on
+the same machine bounced. That is our bookkeeping, not their problem.
+
+- **`_restore_provider`** re-selects and re-connects from the persisted choice.
+  Connect is a cached-token read for an already-authorised account, so it costs
+  a round trip rather than a fresh login.
+- **`_run_commerce_turn`** detects a forgotten session, restores, and retries
+  once **silently**. The user sees their answer, not an apology.
+- **`/cart` and `/search`** self-heal the same way — `/cart` hit the identical
+  wall.
+- Only session loss triggers it. A 429 or a 503 does not, because reconnecting
+  costs a round trip and on a cold token could block.
+- If the restore genuinely fails, the message is plain and names the service
+  the user actually chose.
+
+**The matcher had a bug of its own.** `_friendly_outage` looked for "not
+selected"; the service says "**No** provider selected", which contains no
+"not". The exact string that prompted this fell through to the generic message.
+Now matched on "provider selected" and "/select first" as well.
+
+9 new tests.
+
+---
+
+## 2026-08-24 (earlier) — a 503 mid-checkout, in developer language
 
 A shopper tapped PhonePe and got this, in the middle of paying:
 

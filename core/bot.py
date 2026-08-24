@@ -1901,7 +1901,10 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await typing(update)
     msg = await update.message.reply_text(f"\U0001F50E <i>Searching for {query}\u2026</i>", parse_mode="HTML")
-    result = await commerce.search(update.effective_chat.id, query)
+    chat_id = update.effective_chat.id
+    result = await commerce.search(chat_id, query)
+    if _looks_forgotten_text(result) and await _restore_provider(chat_id):
+        result = await commerce.search(chat_id, query)
     await msg.delete()
     await reply(update.message, result, use_html=True)
 
@@ -1910,7 +1913,14 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the shopping cart. Usage: /cart"""
     await typing(update)
-    await reply(update.message, await commerce.cart(update.effective_chat.id), use_html=True)
+    chat_id = update.effective_chat.id
+    result = await commerce.cart(chat_id)
+    # Same self-heal as the conversational path: a restart of the commerce
+    # service should not make /cart tell you to go and connect something you
+    # already connected.
+    if _looks_forgotten_text(result) and await _restore_provider(chat_id):
+        result = await commerce.cart(chat_id)
+    await reply(update.message, result, use_html=True)
 
 
 @authorized
@@ -2366,20 +2376,41 @@ async def _run_commerce_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
     thinking = await update.message.reply_text("\U0001F50E <i>Looking\u2026</i>", parse_mode="HTML")
 
     data = await commerce.assistant(chat_id, text)
+
+    # The commerce service keeps sessions in memory, so a restart of it wipes
+    # the selected provider and the connected set -- while the bot still has
+    # both on disk. That asymmetry surfaced as "No provider selected. POST
+    # /providers/{id}/select first." in the middle of a conversation, telling
+    # someone who had already connected to go and connect.
+    #
+    # Restore from what we already know and retry once, silently. A user who
+    # connected once should not have to do it again because a process on the
+    # same machine bounced; that is our bookkeeping, not their problem.
+    if _session_was_forgotten(data):
+        restored = await _restore_provider(chat_id)
+        if restored:
+            logger.info(f"Commerce session lost; restored {restored} and retrying")
+            data = await commerce.assistant(chat_id, text)
+
     if not data.get("ok"):
         try:
             await thinking.delete()
         except Exception:
             pass
         error = data.get("error", "")
-        if "not selected" in error or "not connected" in error:
-            # Name the service that is actually unconnected. The old text always
-            # said "/connect swiggy", which is the wrong advice whenever the
-            # selected service is Food or Dineout -- and reads as nonsense to
-            # someone who just logged in to Swiggy successfully.
+        if _session_was_forgotten(data):
+            # The silent restore above already tried and failed, so this is a
+            # real problem rather than lost bookkeeping. Name the service the
+            # user actually chose -- the old text always said "/connect
+            # swiggy", which is wrong for Food or Dineout and reads as nonsense
+            # to someone who just logged in successfully.
             selected = session.get_service(chat_id) or "swiggy"
+            logger.error(f"Commerce session could not be restored: {error}")
             await update.message.reply_text(
-                f"{error}\n\nTry <code>/connect {selected}</code> first.",
+                "\U0001F510 <b>I lost my connection to the store and couldn't "
+                "pick it back up.</b>\n"
+                "Your cart is safe.\n\n"
+                f"Try <code>/connect {selected}</code>.",
                 parse_mode="HTML",
             )
             return True
@@ -2513,10 +2544,13 @@ _OUTAGE_MESSAGES = (
      "Nothing was charged and your cart is safe.\n\n"
      "Give me a few seconds and send that again."),
 
-    (("not connected", "not selected"),
-     "\U0001F510 <b>I'm not signed in to the store.</b>\n"
+    # "No provider selected" contains no "not"; matching only "not selected"
+    # missed the exact string the service actually returns.
+    (("provider selected", "not selected", "/select first",
+      "not connected", "is not connected"),
+     "\U0001F510 <b>I lost my connection to the store.</b>\n"
      "Your cart is safe.\n\n"
-     "Send /providers to see what's connected."),
+     "Send /service to pick it up again."),
 
     (("connect", "connection", "unreachable", "refused",
       "not running", "timed out", "non-json"),
@@ -2545,6 +2579,49 @@ def _friendly_outage(error: str) -> str:
         if any(m in lowered for m in markers):
             return message
     return _OUTAGE_DEFAULT
+
+
+# The commerce service's way of saying it has no memory of this session.
+_FORGOTTEN_MARKERS = (
+    "no provider selected",
+    "not selected",
+    "/select first",
+    "is not connected",
+    "not connected",
+)
+
+
+def _looks_forgotten_text(result: str) -> bool:
+    """Same check, for helpers that return a rendered string rather than a dict."""
+    return any(m in str(result).lower() for m in _FORGOTTEN_MARKERS)
+
+
+def _session_was_forgotten(data: dict) -> bool:
+    if data.get("ok"):
+        return False
+    return any(m in str(data.get("error", "")).lower() for m in _FORGOTTEN_MARKERS)
+
+
+async def _restore_provider(chat_id: int) -> str | None:
+    """Re-select and re-connect the service this chat already chose.
+
+    Returns the provider id on success, None if there is nothing to restore or
+    the reconnect failed. Connect is a cached-token read for an account that is
+    already authorised, so this costs a round trip rather than a fresh login.
+    """
+    provider_id = session.get_service(chat_id)
+    if not provider_id:
+        return None
+    try:
+        await commerce.select(chat_id, provider_id)
+        result = await commerce.connect(chat_id, provider_id)
+    except Exception as exc:
+        logger.warning(f"Could not restore commerce session: {exc}")
+        return None
+    if isinstance(result, str) and "error" in result.lower():
+        logger.warning(f"Reconnect reported a problem: {result[:200]}")
+        return None
+    return provider_id
 
 
 async def _confirm_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: dict) -> bool:

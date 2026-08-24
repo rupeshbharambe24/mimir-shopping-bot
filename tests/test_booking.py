@@ -198,3 +198,70 @@ def test_a_busy_model_is_described_as_busy_not_as_broken():
     msg = bot._friendly_outage("503 UNAVAILABLE high demand")
     assert "overloaded" in msg.lower() or "busy" in msg.lower()
     assert "few seconds" in msg.lower()
+
+
+# ── the commerce service forgetting is our problem, not the user's ───
+
+@pytest.mark.parametrize("error", [
+    "No provider selected. POST /providers/{id}/select first.",
+    "Provider 'swiggy_food' is not connected. POST /providers/swiggy_food/connect first.",
+    "no provider selected",
+])
+def test_a_forgotten_session_is_recognised(error):
+    """The commerce service keeps sessions in memory, so restarting it wipes
+    the selected provider while the bot still has it on disk. That asymmetry
+    told a user who had already connected to go and connect."""
+    from core import bot
+
+    assert bot._session_was_forgotten({"ok": False, "error": error}) is True
+    assert bot._looks_forgotten_text(error) is True
+
+
+def test_a_successful_response_is_never_treated_as_forgotten():
+    from core import bot
+
+    assert bot._session_was_forgotten({"ok": True, "error": ""}) is False
+
+
+def test_other_failures_do_not_trigger_a_reconnect():
+    """Reconnecting costs a round trip and, on a cold token, could block."""
+    from core import bot
+
+    for e in ("429 RESOURCE_EXHAUSTED", "503 UNAVAILABLE", "KeyError: x"):
+        assert bot._session_was_forgotten({"ok": False, "error": e}) is False
+
+
+def test_the_no_provider_error_never_reaches_the_user_verbatim():
+    """"POST /providers/{id}/select first" is an instruction to a developer
+    holding an HTTP client, not to someone buying biscuits."""
+    from core import bot
+
+    msg = bot._friendly_outage("No provider selected. POST /providers/{id}/select first.")
+    assert "POST" not in msg
+    assert "/providers/{id}" not in msg
+    assert "cart is safe" in msg
+    assert "/service" in msg
+
+
+def test_the_conversational_path_restores_before_giving_up():
+    import inspect
+
+    from core import bot
+
+    src = inspect.getsource(bot._run_commerce_turn)
+    assert "_restore_provider" in src
+    restore_at = src.index("_restore_provider")
+    fail_at = src.index("_friendly_outage")
+    assert restore_at < fail_at, "the retry must come before the failure message"
+
+
+@pytest.mark.parametrize("command", ["cmd_cart", "cmd_search"])
+def test_the_direct_commands_self_heal_too(command):
+    """/cart hit the same wall: a restart of the commerce service should not
+    make it tell you to connect something you already connected."""
+    import inspect
+
+    from core import bot
+
+    src = inspect.getsource(getattr(bot, command))
+    assert "_restore_provider" in src, f"{command} does not recover a lost session"
