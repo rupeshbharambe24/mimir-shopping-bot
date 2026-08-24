@@ -11,7 +11,54 @@ wrong account.
 
 ---
 
-## 2026-08-24 (latest) — Mimir was inventing prices in dollars
+## 2026-08-24 (later) — why GROQ_API_KEY was never the backup
+
+Reported as "Gemini limit hit, that's why I put the backup Groq, why is it not
+working". It was never wired to the thing that was failing.
+
+**There are two LLM layers.** `core/llm_cascade.py` cascades Groq -> Gemini ->
+Ollama, and it is the BOT's loop. The commerce agent -- which handles every
+shopping turn -- is `agentic-commerce/backend/agent/loop.py`, and it is Gemini
+only. The commerce side has never contained the string "Groq". Until the
+fallthrough was removed, Groq appeared to be a backup only because a Gemini
+failure silently handed the turn to the bot's loop, which is exactly the path
+that invented dollar prices.
+
+**Why the quota was hit at all.** The 429 names it precisely:
+
+    quotaId: GenerateContentInputTokensPerModelPerMinute-FreeTier
+    quotaDimensions: {"model": "gemini-3.5-flash-lite"}
+    limit: 250000
+
+An INPUT-token limit. History was never trimmed, so every turn re-uploaded the
+whole conversation including each product-search payload verbatim. Ten searches
+in, a single "add it to cart" was sending tens of thousands of tokens of
+already-answered questions. The quota was exhausted by repetition, not by use.
+
+- **`trim_history`** keeps the last `AGENT_MAX_USER_TURNS` (6) complete turns.
+  It cuts only at a real user turn, which matters more than it looks: tool
+  results are appended with `role="user"` as well, so role alone cannot identify
+  them, and cutting mid-sequence would orphan a `function_response` whose
+  `function_call` had been dropped -- turning a token problem into a hard 400.
+- **Per-model failover.** Because the quota is per MODEL, a second Gemini model
+  has its own bucket and is a genuine fallback rather than a retry against the
+  same wall. `GEMINI_MODEL_FALLBACKS` is tried in order on 429. Only rate limits
+  trigger it: a 400 would fail identically everywhere and retrying it just burns
+  three quotas instead of one.
+
+Deliberately NOT the Groq cascade. Groq and Gemini speak different
+function-calling dialects, and converting the loop that drives the money path is
+a change that can introduce a new class of bug. Same-SDK failover first, because
+it cannot.
+
+Verified: six rapid turns, `gemini-3.5-flash-lite` rate-limited twice, failover
+fired, all six returned 200. Before this they were hard failures.
+
+13 new tests.
+
+---
+
+## 2026-08-24 — Mimir was inventing prices in dollars
 
 Reported as "it forgets things and cannot add to cart". The screenshots showed
 worse: a cart the user never built, prices quoted as "$1.99" and "Cart total:

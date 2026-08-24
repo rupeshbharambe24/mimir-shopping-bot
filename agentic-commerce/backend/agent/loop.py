@@ -30,6 +30,56 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
+# Models to try, in order, when the one above is rate-limited.
+#
+# The free-tier quota that bites is PER MODEL -- the 429 says so explicitly:
+#
+#   quotaId: GenerateContentInputTokensPerModelPerMinute-FreeTier
+#   quotaDimensions: {"model": "gemini-3.5-flash-lite"}
+#
+# so a second model has its own 250,000 input-tokens-per-minute bucket and is a
+# real fallback rather than a retry against the same wall. This is deliberately
+# NOT the Groq/Ollama cascade the bot uses: those speak a different function-
+# calling dialect, and converting mid-order is a change to the loop that drives
+# the money path. Same-SDK failover first, because it is the change that cannot
+# introduce a new class of bug.
+MODEL_FALLBACKS = [
+    m.strip() for m in os.environ.get(
+        "GEMINI_MODEL_FALLBACKS", "gemini-flash-latest,gemini-2.5-flash"
+    ).split(",") if m.strip()
+]
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    blob = f"{type(exc).__name__}: {exc}"
+    return "429" in blob or "RESOURCE_EXHAUSTED" in blob or "quota" in blob.lower()
+
+
+async def _generate_with_failover(client, *, contents, config, emit=None):
+    """Ask Gemini, moving to the next model when one is rate-limited.
+
+    Only rate limits trigger failover. A bad request is a bug in what we sent
+    and would fail identically on every model, so retrying it just burns three
+    quotas instead of one.
+    """
+    models = [DEFAULT_MODEL] + [m for m in MODEL_FALLBACKS if m != DEFAULT_MODEL]
+    last: Exception | None = None
+
+    for name in models:
+        try:
+            return await client.aio.models.generate_content(
+                model=name, contents=contents, config=config
+            )
+        except Exception as exc:
+            if not _is_rate_limited(exc):
+                raise
+            last = exc
+            logger.warning("Model %s rate-limited; trying the next one", name)
+            if emit is not None:
+                await emit({"type": "model_failover", "from": name})
+
+    raise last if last else RuntimeError("no model available")
+
 # Fallback only. The real set comes from the adapter (see _dangerous_for): a
 # hardcoded set here would silently fail to guard any provider that names its
 # order-placing tool differently.
@@ -116,6 +166,56 @@ async def build_gemini_tools(adapter: ProviderAdapter) -> list:
     return [genai_types.Tool(function_declarations=decls)]
 
 
+# How many complete user turns of context to carry. The quota that actually
+# bites is INPUT tokens per minute (Gemini free tier: 250,000/min for one
+# model), and history was never trimmed -- so every turn re-sent the entire
+# conversation including every product-search payload verbatim. Ten searches in
+# and a single "add it to cart" was uploading tens of thousands of tokens of
+# already-answered questions, which is what exhausted the quota rather than any
+# real volume of use.
+MAX_USER_TURNS = int(os.environ.get("AGENT_MAX_USER_TURNS", "6"))
+
+
+def _is_real_user_turn(entry) -> bool:
+    """A message the human typed, as opposed to a tool result.
+
+    Tool results are appended with role="user" too, so the role alone cannot
+    tell them apart -- they carry function_response parts instead of text. That
+    distinction is what makes trimming safe: cutting mid-sequence would leave a
+    function_response whose matching function_call had been dropped, and Gemini
+    rejects that outright.
+    """
+    if getattr(entry, "role", None) != "user":
+        return False
+    for part in getattr(entry, "parts", None) or []:
+        if getattr(part, "function_response", None) is not None:
+            return False
+        if getattr(part, "text", None):
+            return True
+    return False
+
+
+def trim_history(history: list, max_user_turns: int = None) -> list:
+    """Drop the oldest complete turns, in place, keeping recent context.
+
+    Cuts only at a real user turn so every function_call keeps its matching
+    function_response. Returns the same list object -- callers hold a reference
+    to Session.history and expect it mutated.
+    """
+    limit = MAX_USER_TURNS if max_user_turns is None else max_user_turns
+    if limit <= 0:
+        return history
+
+    starts = [i for i, e in enumerate(history) if _is_real_user_turn(e)]
+    if len(starts) <= limit:
+        return history
+
+    cut = starts[-limit]
+    if cut > 0:
+        del history[:cut]
+    return history
+
+
 async def run_turn(client, adapter: ProviderAdapter, gemini_tools, history, user_input, *, armed: bool, emit=None):
     """One user turn: ask Gemini, execute any tool calls it makes against the
     adapter, feed results back, repeat until it produces text (max 10 hops).
@@ -133,6 +233,7 @@ async def run_turn(client, adapter: ProviderAdapter, gemini_tools, history, user
                 print(f"  <- [tool result] {ev['text'][:300]}")
 
     history.append(genai_types.Content(role="user", parts=[genai_types.Part(text=user_input)]))
+    trim_history(history)
 
     config = genai_types.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT,
@@ -144,8 +245,8 @@ async def run_turn(client, adapter: ProviderAdapter, gemini_tools, history, user
     dangerous = _dangerous_for(adapter)
 
     for _ in range(10):
-        response = await client.aio.models.generate_content(
-            model=DEFAULT_MODEL, contents=history, config=config
+        response = await _generate_with_failover(
+            client, contents=history, config=config, emit=emit
         )
         if not response.candidates:
             return "(no response)"
