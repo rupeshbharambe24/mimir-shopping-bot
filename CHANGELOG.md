@@ -11,7 +11,40 @@ wrong account.
 
 ---
 
-## 2026-08-21 (latest) — Swiggy Food actually works
+## 2026-08-22 — the wrong venv now says so, and Food grew two tools
+
+Running `python3 main.py` from the agentic-commerce venv produced a bare
+`ModuleNotFoundError: No module named 'telegram'`, which reads as a missing
+dependency rather than the wrong interpreter. The two venvs are separate on
+purpose — the sidecar pins `mcp==2.0.0` exactly, and merging those pins into
+the bot would let a provider-SDK bump take the bot down — but nothing enforced
+or explained that at the point of failure.
+
+The obvious next step makes it worse. `pip install telegram` installs an
+unrelated 879-byte package squatting the name on PyPI; the real one is
+`python-telegram-bot`. It imports fine and then fails with "cannot import name
+'Update' from 'telegram'", which looks like a version problem and is not one.
+
+`main.py` now checks the interpreter before anything imports telegram: it
+detects a missing library, detects the squatter by the absence of
+`telegram.Update`, names the agentic-commerce venv specifically when that is
+where you are, prints the exact command to use, and says not to install
+`telegram`.
+
+**Food went from 18 tools to 20** between 2026-08-21 and 2026-08-22.
+`create_address` and `delete_address` appeared — the same two the Instamart
+manifest records as documented-but-absent when it was verified. Swiggy ships
+these servers continuously, so EXPECTED_TOOLS is a snapshot, not a contract,
+and the ADR-3 drift check exists for exactly this. Manifest updated; the
+discovery script now reports an exact match.
+
+Note `delete_address` is destructive but not a money path, so it is NOT in
+DANGEROUS_TOOLS — that set is documented as "tools that spend real money" and
+widening it silently would blur what an approval prompt means.
+
+---
+
+## 2026-08-21 — Swiggy Food actually works
 
 Food was registered, guarded, flag-checked and completely non-functional. Auth
 was fine and all 17 expected tool names existed on the live server; every call

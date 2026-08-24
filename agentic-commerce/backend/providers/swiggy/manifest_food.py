@@ -78,9 +78,16 @@ ADDRESS_SCOPED = frozenset({
     "get_food_cart", "update_food_cart", "place_food_order",
 })
 
-# VERIFIED 2026-08-21: the live server exposes exactly these 18.
+# VERIFIED 2026-08-22: the live server exposes exactly these 20.
+#
+# It exposed 18 on 2026-08-21. `create_address` and `delete_address` appeared
+# between the two runs -- the same two tools the Instamart manifest records as
+# documented-but-absent when that one was verified. Swiggy ships these servers
+# continuously, so this set is a snapshot rather than a contract, and the ADR-3
+# drift check exists because of exactly this.
 EXPECTED_TOOLS = {
-    "get_addresses", "search_restaurants", "search_menu", "get_restaurant_menu",
+    "get_addresses", "create_address", "delete_address",
+    "search_restaurants", "search_menu", "get_restaurant_menu",
     "get_food_cart", "update_food_cart", "flush_food_cart",
     "fetch_food_coupons", "apply_food_coupon",
     "place_food_order", "get_payment_options", "check_payment_status",
