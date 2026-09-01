@@ -11,7 +11,40 @@ wrong account.
 
 ---
 
-## 2026-08-24 (latest) — the bot now picks its own session back up
+## 2026-08-24 (latest) — "all three providers are OFF" when two were fine
+
+Reported from the startup banner. Checked live: Groq HTTP 200, Gemini HTTP 200,
+Ollama refused. Two of the three were working the whole time.
+
+`is_alive()` returned one boolean per provider, so four different situations
+printed the same word:
+
+| Reality | Printed | What it actually needs |
+|---|---|---|
+| unreachable | OFF | investigate |
+| 429 rate-limited | OFF | wait a minute |
+| 401/403 | OFF | fix the key |
+| no key configured | OFF | set one |
+
+During the Groq rate-limit storm earlier that day, every provider read OFF at
+once — which says "your setup is broken" when the truth was "you are sending
+too fast", "no key" and "not installed" respectively. That banner is also a
+boot snapshot that never refreshes, so a wrong verdict sits there all session.
+
+- **`health()`** returns `ok` / `limited` / `bad_key` / `no_key` / `off`.
+  `is_alive()` still returns booleans, so nothing that used it breaks.
+- **429 is `limited`, not off.** The provider is up and the key is good.
+- **One retry** before calling something off, since a cold start can beat the
+  network up and people keep looking at that banner.
+- **Ollama is labelled optional** in both displays. It is not installed on this
+  machine, which is fine — it is the last-resort fallback behind two cloud
+  providers, and an unexplained OFF reads like a fault.
+
+12 new tests.
+
+---
+
+## 2026-08-24 (earlier) — the bot now picks its own session back up
 
 Mid-conversation, in the chat:
 

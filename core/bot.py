@@ -3105,9 +3105,18 @@ async def post_init(application: Application):
         import datetime
 
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        health = await llm.is_alive()
+        health = await llm.health()
 
-        def _dot(ok): return "ON" if ok else "OFF"
+        # Was: "ON"/"OFF". A rate-limited provider is not off, and a banner
+        # saying so had the reader hunting for a broken key when the fix was to
+        # wait a minute -- and it is a boot snapshot that never refreshes, so
+        # that wrong verdict sits there all session.
+        _LABELS = {
+            "ok": "ON", "limited": "LIMITED", "bad_key": "BAD KEY",
+            "no_key": "no key", "off": "OFF",
+        }
+
+        def _dot(state): return _LABELS.get(state, str(state))
 
         try:
             disk = shutil.disk_usage(str(Config.WORKSPACE))
@@ -3128,9 +3137,9 @@ async def post_init(application: Application):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "\n"
             f"  Time:    {now}\n"
-            f"  Groq:    {_dot(health.get('Groq', False))}\n"
-            f"  Gemini:  {_dot(health.get('Gemini', False))}\n"
-            f"  Ollama:  {_dot(health.get('Ollama', False))}\n"
+            f"  Groq:    {_dot(health.get('Groq'))}\n"
+            f"  Gemini:  {_dot(health.get('Gemini'))}\n"
+            f"  Ollama:  {_dot(health.get('Ollama'))}  (optional)\n"
             f"  Disk:    {disk_free}\n"
             f"  GPU:     {gpu_line}\n"
             "\n"

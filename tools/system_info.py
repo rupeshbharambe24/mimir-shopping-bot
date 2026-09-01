@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 async def get_status() -> str:
     llm = SmartLLM()
-    health = await llm.is_alive()
+    health = await llm.health()
 
     try:
         disk = shutil.disk_usage(str(Config.WORKSPACE))
@@ -18,8 +18,20 @@ async def get_status() -> str:
     except Exception:
         disk_line = "Disk: unable to check"
 
-    def _badge(ok: bool) -> str:
-        return "OK" if ok else "OFFLINE"
+    # Each state gets its own wording, because each needs a different reaction:
+    # wait, fix a key, install something, or investigate.
+    _BADGES = {
+        "ok":      "OK",
+        "limited": "RATE-LIMITED (working, just throttled)",
+        "bad_key": "KEY REJECTED",
+        "no_key":  "no key set",
+        "off":     "unreachable",
+    }
+
+    def _badge(state: str) -> str:
+        return _BADGES.get(state, state)
+
+    ollama_note = "  - optional, only used if both cloud providers fail"
 
     lines = [
         "SYSTEM STATUS",
@@ -29,6 +41,7 @@ async def get_status() -> str:
         f"  Groq:   {_badge(health['Groq'])}  ({Config.GROQ_MODEL})",
         f"  Gemini: {_badge(health['Gemini'])}  ({Config.GEMINI_MODEL})",
         f"  Ollama: {_badge(health['Ollama'])}  ({Config.OLLAMA_URL})",
+        ollama_note if health["Ollama"] != "ok" else "",
         f"Default model: {Config.DEFAULT_MODEL}",
         f"Code model: {Config.CODE_MODEL}",
         disk_line,

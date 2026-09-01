@@ -44,6 +44,14 @@ GROQ = "Groq"
 GEMINI = "Gemini"
 OLLAMA = "Ollama"
 
+# Provider states. Four, not two, because "cannot reach it" and "you are going
+# too fast" and "that key is wrong" need different reactions from the reader.
+OK = "ok"
+LIMITED = "limited"     # reachable, key valid, currently rate-limited (429)
+BAD_KEY = "bad_key"     # reachable, key rejected (401/403)
+NO_KEY = "no_key"       # nothing configured
+OFF = "off"             # unreachable
+
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 
@@ -105,17 +113,71 @@ class SmartLLM:
             return None
 
     async def is_alive(self) -> dict:
-        """Check connectivity for all three providers. Returns a status dict."""
-        groq_ok, gemini_ok, ollama_ok = await asyncio.gather(
-            self._ping_groq(),
-            self._ping_gemini(),
-            self._ping_ollama(),
+        """Liveness for all three providers, as booleans (back-compatible)."""
+        detail = await self.health()
+        return {name: state == OK for name, state in detail.items()}
+
+    async def health(self) -> dict:
+        """Per-provider state, distinguishing failures that mean different things.
+
+        A single boolean conflated four situations that call for four different
+        responses, and printing OFF for all of them was actively misleading:
+        during a Groq rate-limit storm every provider read OFF, which says "your
+        setup is broken" when the truth was "you are sending too fast" for one,
+        "you have no key" for another and "not installed" for the third.
+        """
+        groq, gemini, ollama = await asyncio.gather(
+            self._probe(GROQ), self._probe(GEMINI), self._probe(OLLAMA),
         )
-        return {
-            GROQ: groq_ok,
-            GEMINI: gemini_ok,
-            OLLAMA: ollama_ok,
-        }
+        return {GROQ: groq, GEMINI: gemini, OLLAMA: ollama}
+
+    async def _probe(self, provider: str) -> str:
+        """One provider's state. Retries once: a cold start can beat the network
+        up, and the boot banner is a verdict people keep looking at."""
+        for attempt in range(2):
+            state = await self._probe_once(provider)
+            if state != OFF or attempt:
+                return state
+            await asyncio.sleep(1.0)
+        return OFF
+
+    async def _probe_once(self, provider: str) -> str:
+        if provider == GROQ:
+            if not Config.GROQ_API_KEY:
+                return NO_KEY
+            return await self._status_of(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {Config.GROQ_API_KEY}"},
+            )
+        if provider == GEMINI:
+            if not Config.GEMINI_API_KEY:
+                return NO_KEY
+            return await self._status_of(
+                "https://generativelanguage.googleapis.com/v1beta/models"
+                f"?key={Config.GEMINI_API_KEY}"
+            )
+        return await self._status_of(f"{Config.OLLAMA_URL}/api/tags")
+
+    @staticmethod
+    async def _status_of(url: str, headers: dict | None = None) -> str:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, headers=headers or {}, timeout=aiohttp.ClientTimeout(total=8)
+                ) as resp:
+                    if resp.status == 200:
+                        return OK
+                    # 429 is the important one: the provider is up and the key
+                    # is good, we are simply sending faster than the tier
+                    # allows. Reporting that as OFF sends people hunting for a
+                    # broken key when the fix is to wait a minute.
+                    if resp.status == 429:
+                        return LIMITED
+                    if resp.status in (401, 403):
+                        return BAD_KEY
+                    return OFF
+        except Exception:
+            return OFF
 
     def get_status(self) -> str:
         """Return which provider handled the last request."""
